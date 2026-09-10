@@ -1,0 +1,81 @@
+{
+  "name": "@fancaf/live-sdk",
+  "version": "0.1.0",
+  "description": "H5 live-streaming player SDK (HLS + fMP4 + hls.js, headless kernel + plugin architecture)",
+  "type": "module",
+  "main": "./dist/live-sdk.es.js",
+  "module": "./dist/live-sdk.es.js",
+  "unpkg": "./dist/live-sdk.umd.js",
+  "jsdelivr": "./dist/live-sdk.umd.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/live-sdk.es.js",
+      "default": "./dist/live-sdk.es.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/live-sdk-ui.es.js",
+      "default": "./dist/live-sdk-ui.es.js"
+    },
+    "./react": {
+      "types": "./dist/adapters/react.d.ts",
+      "import": "./dist/live-sdk-react.es.js",
+      "default": "./dist/live-sdk-react.es.js"
+    },
+    "./vue": {
+      "types": "./dist/adapters/vue.d.ts",
+      "import": "./dist/live-sdk-vue.es.js",
+      "default": "./dist/live-sdk-vue.es.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && vite build --config vite.ui.config.ts && vite build --config vite.react.config.ts && vite build --config vite.vue.config.ts && tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install chromium webkit",
+    "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/smoke.mjs",
+    "verify:all": "npm run test && npm run build && npm run verify && npm run e2e",
+    "prepublishOnly": "npm run build && npm run verify"
+  },
+  "keywords": [
+    "live",
+    "player",
+    "hls",
+    "fmp4",
+    "headless",
+    "hls.js"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "hls.js": "^1.5.17"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/react": "^18.3.31",
+    "react": "^18.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.8",
+    "vitest": "^2.1.9",
+    "vue": "^3.5.42"
+  }
+}

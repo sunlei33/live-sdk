@@ -1,0 +1,76 @@
+import type { Plugin, PluginConstructor } from '../types'
+import type { Player } from './Player'
+import { logger } from '../utils/logger'
+
+/**
+ * PluginManager：插件注册/注销/生命周期调度。
+ * 顺序：create（注入 player）→ init（读配置）→ ready（内核就绪后）。
+ */
+export class PluginManager {
+  private plugins = new Map<string, Plugin>()
+
+  constructor(private player: Player) {}
+
+  add(Ctor: PluginConstructor, config?: unknown): Plugin {
+    const instance = new Ctor()
+    const name = instance.name
+    if (this.plugins.has(name)) {
+      logger.warn(`[plugin] 同名插件已存在，跳过：${name}`)
+      return this.plugins.get(name)!
+    }
+    instance.create(this.player)
+    instance.init(config)
+    this.plugins.set(name, instance)
+    // 内核已就绪则立即补调 ready
+    if (this.player.kernelReady) {
+      try {
+        instance.ready()
+      } catch (err) {
+        logger.error(`[plugin] ready() 异常 ${name}`, err)
+      }
+    }
+    return instance
+  }
+
+  remove(name: string): void {
+    const instance = this.plugins.get(name)
+    if (!instance) return
+    try {
+      instance.destroy()
+    } catch (err) {
+      logger.error(`[plugin] destroy() 异常 ${name}`, err)
+    }
+    this.plugins.delete(name)
+  }
+
+  /** 内核就绪后广播 ready */
+  readyAll(): void {
+    for (const [name, instance] of this.plugins) {
+      try {
+        instance.ready()
+      } catch (err) {
+        logger.error(`[plugin] ready() 异常 ${name}`, err)
+      }
+    }
+  }
+
+  /** 按名查找（供上报等内部协作） */
+  get<T extends Plugin = Plugin>(name: string): T | undefined {
+    return this.plugins.get(name) as T | undefined
+  }
+
+  all(): Plugin[] {
+    return [...this.plugins.values()]
+  }
+
+  destroyAll(): void {
+    for (const [name, instance] of this.plugins) {
+      try {
+        instance.destroy()
+      } catch (err) {
+        logger.error(`[plugin] destroy() 异常 ${name}`, err)
+      }
+    }
+    this.plugins.clear()
+  }
+}

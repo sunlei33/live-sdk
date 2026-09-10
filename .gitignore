@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Vite/Vitest 在加载 .ts 配置文件时生成的临时 bundle（正常退出会自删，
+# 进程被中断/崩溃时会残留）
+*.timestamp-*.mjs
+
+test-results/
+playwright-report/
+coverage/

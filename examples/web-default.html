@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>live-sdk 示例：纯 H5 + 默认 UI</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; margin: 24px; background: #111; color: #eee; }
+    #player { width: 100%; max-width: 720px; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; overflow: hidden; }
+    .hint { color: #999; font-size: 13px; margin-top: 12px; }
+    .hint a { color: #7ab8ff; }
+    .row { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .row input[type="text"] {
+      flex: 1; min-width: 320px; padding: 7px 10px; border-radius: 6px;
+      border: 1px solid #444; background: #1c1c1c; color: #eee; font: 13px/1.4 monospace;
+    }
+    button { padding: 7px 14px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; cursor: pointer; }
+    button:hover { background: #2e2e2e; }
+    .status { font: 12px/1.6 monospace; margin-top: 8px; min-height: 18px; color: #8fd08f; }
+    .status.err { color: #ff8080; }
+  </style>
+</head>
+<body>
+  <h3>live-sdk 最简落地（纯 H5 + 默认 UI 包）</h3>
+  <div id="player"></div>
+  <p class="hint">
+    默认控件：播放/暂停、静音、<b>音量滑块</b>、<b>清晰度</b>、全屏。
+    清晰度档位由业务下发（`PlayConfig.quality`），manifest 解析后自动与流对齐、面板出现。
+    换流：点击下方测试流按钮，或粘贴任意 m3u8 地址后点击「播放该地址」。
+  </p>
+
+  <!-- 自定义地址输入：测试用户任意 m3u8 -->
+  <div class="row">
+    <input id="urlInput" type="text" placeholder="粘贴自定义 m3u8 地址，如 https://example.com/live/master.m3u8"
+           value="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" />
+    <button id="loadBtn">播放该地址</button>
+  </div>
+
+  <!-- 预置测试流 -->
+  <div class="row">
+    <button data-url="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8">mux（多码率）</button>
+    <button data-url="https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8">Apple fMP4 多码率</button>
+    <button data-url="https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8">unified-streaming 直播（低延迟）</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "hls.js": "https://cdn.jsdelivr.net/npm/hls.js@1.7.2/dist/hls.mjs"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import { createPlayer } from '../dist/live-sdk.es.js'
+    import { mountDefaultUI } from '../dist/live-sdk-ui.es.js'
+
+    const DEFAULT_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
+    const statusEl = document.getElementById('status')
+    const setStatus = (msg, isErr = false) => {
+      statusEl.textContent = msg
+      statusEl.classList.toggle('err', isErr)
+    }
+
+    // 档位元数据（业务下发）：id 自定义，height 对齐 master m3u8 的 RESOLUTION。
+    // 各测试流的可用档位不同，按地址给对应元数据——这正是 PlayConfig.quality 的真实用法。
+    const QUALITY_PRESETS = {
+      'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8': [
+        { id: 1, label: '1080P 蓝光', height: 1080 },
+        { id: 2, label: '720P 高清', height: 720 },
+        { id: 3, label: '480P 标清', height: 480 },
+        { id: 4, label: '288P 流畅', height: 288 },
+        { id: 5, label: '184P 极速', height: 184 },
+      ],
+      'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8': [
+        { id: 1, label: '1080P', height: 1080 },
+        { id: 2, label: '720P', height: 720 },
+        { id: 3, label: '480P', height: 480 },
+        { id: 4, label: '360P', height: 360 },
+      ],
+    }
+    const qualityFor = (url) => QUALITY_PRESETS[url] ?? []
+
+    // 1) 创建播放器：起播走 provider（模拟业务接口下发 url + quality），SDK 解析档位元数据
+    const player = createPlayer({
+      container: '#player',
+      autoplay: true,
+      muted: true,            // 移动端静音自动播放
+    })
+
+    // 2) 一键挂载默认控件层（播放/暂停、静音、音量、清晰度、全屏）
+    mountDefaultUI(player)
+
+    // 3) 起播：provider 返回 { url, quality }，manifest 解析后清晰度面板自动出现
+    player.play(() => ({ url: DEFAULT_URL, quality: qualityFor(DEFAULT_URL) }))
+
+    // 4) 能力对齐：manifest 解析后看低延迟 / 清晰度 / ABR 是否端到端可用
+    player.on('features_updated', (report) => {
+      console.table(report.features.map(f => ({
+        feature: f.feature, client: f.client, server: f.server, matched: f.matched,
+      })))
+    })
+
+    // 5) 错误处理：可恢复错误 SDK 自动重连，仅 fatal 才需介入
+    player.on('error', (e) => {
+      if (e.fatal) {
+        setStatus(`直播不可用：${e.code} ${e.message}`, true)
+        console.error('直播不可用', e.code, e.message)
+      }
+    })
+
+    // 6) 应用内换流：重新起播并带上该流对应的档位元数据（切换后清晰度面板随之刷新）
+    async function loadURL(url) {
+      if (!/^https?:\/\//i.test(url)) {
+        setStatus('地址需以 http:// 或 https:// 开头（m3u8 通常受同源/跨域限制）', true)
+        return
+      }
+      const quality = qualityFor(url)
+      setStatus(`正在加载：${url}` + (quality.length ? `（${quality.length} 档清晰度）` : '（无档位元数据）'))
+      try {
+        await player.play(() => ({ url, quality }))
+        setStatus(`已切换：${url}` + (quality.length ? `（清晰度面板已就绪）` : ''))
+      } catch (e) {
+        setStatus(`加载失败：${e?.message ?? e}`, true)
+      }
+    }
+
+    document.querySelectorAll('button[data-url]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById('urlInput').value = btn.dataset.url
+        loadURL(btn.dataset.url)
+      })
+    })
+
+    // 7) 自定义地址输入框：回车或点击按钮即加载
+    const input = document.getElementById('urlInput')
+    document.getElementById('loadBtn').addEventListener('click', () => loadURL(input.value.trim()))
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') loadURL(input.value.trim())
+    })
+
+    // 8) 页面卸载前销毁（内核建的 DOM 由 destroy 清理）
+    window.addEventListener('pagehide', () => player.destroy())
+  </script>
+</body>
+</html>

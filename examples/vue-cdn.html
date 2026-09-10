@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="F13GeeeejMJC73ktxrMDC9">
+<head data-page-node-id="5P3ESQ9D4rcjQF20clKi1t">
+  <meta charset="UTF-8" data-page-node-id="QyMKu1EfWSvDcMboAzsRbP" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="WxUZhqP1v5NOmUb2Ew6HIZ" />
+  <title>live-sdk · Vue 无构建 demo</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; }
+    .stage { width: 640px; height: 360px; background: #000; border-radius: 8px; }
+    .controls { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+    button { padding: 6px 14px; cursor: pointer; }
+    .badge { font: 12px/1 monospace; color: #666; }
+    .tip { margin-top: 12px; font: 12px/1.5 monospace; color: #999; }
+  </style>
+</head>
+<body data-page-node-id="BZQzXXGMUFGodaFIPNF96L">
+  <h3 data-page-node-id="ZBMZw2vdK1CY8bwLNjuzJp">Vue 无构建接入（vue.global 完整版，DOM 内模板）</h3>
+
+  <div id="app" data-page-node-id="ghFuOKMk6o1T722QDlmWs4">
+    <div class="stage" ref="stage" data-page-node-id="7m6xPJc2f3YyWQyBpqIXTa"></div>
+    <div class="controls" data-page-node-id="MTgsqmlUjFwvIekHqg4fmi">
+      <button @click="toggle" data-page-node-id="fcuY16nOLtwbMoDKzOaIan">{{ state && state.playing ? '暂停' : '播放' }}</button>
+      <button @click="toggleMute" data-page-node-id="gtQhg8YnL0NNuEFuUF8Xe7">{{ state && state.muted ? '开声' : '静音' }}</button>
+      <span class="badge" data-page-node-id="XFKwcAAnA8mDiB2IvWk9B9">{{ state && state.currentQuality != null ? '清晰度 #' + state.currentQuality : '清晰度自动' }}</span>
+    </div>
+    <div class="tip" data-page-node-id="aqRcNc2fRzOWH84yUHYaeq">模板由 vue.global 内置编译器在运行时编译；player 在 onMounted 后创建，usePlayer 订阅其状态。</div>
+  </div>
+
+  <!-- 1) Vue 完整版（含运行时编译器，全局 Vue） -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+
+  <!-- 2) hls.js UMD（全局 Hls） -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+
+  <!-- 3) live-sdk：core UMD + vue 适配器 UMD（全局 LiveSdk / LiveSdkVue） -->
+  <script src="../dist/live-sdk.umd.js"></script>
+  <script src="../dist/live-sdk-vue.umd.js"></script>
+
+  <script>
+    const { createApp, ref, onMounted } = Vue
+    const { createPlayer } = LiveSdk
+    const { usePlayer } = LiveSdkVue
+
+    const TEST_STREAM = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
+
+    createApp({
+      setup() {
+        const player = ref(null) // 就绪前 null，onMounted 后赋值
+        const stage = ref(null)
+
+        onMounted(() => {
+          player.value = createPlayer({
+            container: stage.value,
+            url: TEST_STREAM,
+            autoplay: true,
+            muted: true,
+          })
+        })
+
+        const state = usePlayer(player) // Ref<PlayerState | null>
+
+        function toggle() {
+          if (state.value && state.value.playing) player.value.pause()
+          else player.value.play()
+        }
+        function toggleMute() {
+          if (state.value) player.value.setMuted(!state.value.muted)
+        }
+
+        return { player, state, stage, toggle, toggleMute }
+      },
+    }).mount('#app')
+  </script>
+</body>
+</html>

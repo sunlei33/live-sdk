@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="20RuX8TlcGbznc25XZVEdF">
+<head data-page-node-id="LGqCSLGmAEQonf9sl7g0CO">
+  <meta charset="UTF-8" data-page-node-id="bugWOoVD7wZ5sUmXpfjD5l" />
+  <title>live-sdk E2E harness</title>
+  <style>
+    html, body { margin: 0; background: #000; }
+    #player { width: 640px; height: 360px; }
+  </style>
+</head>
+<body data-page-node-id="DgCFvGwFnp7UG0H72OLvmv">
+  <div id="player" data-page-node-id="QSvBBn4803PcV4bc84KDVA"></div>
+
+  <!--
+    dist 产物把 hls.js 作为 external（bare specifier），浏览器需要 importmap 才能解析。
+    E2E 注入 MockKernel 后压根不会实例化 HlsKernel，所以这里给一个桩即可——
+    它是被「静态解析」到但不会被「实际执行」的（除非用例特意去选内核）。
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "hls.js": "/test/e2e/hls-stub.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    /**
+     * E2E 宿主页。
+     *
+     * 关键设计：**注入 MockKernel**，而不是打真实 HLS 流。
+     * 原因：
+     *   1. 真实直播流不可控——无法按指令制造「断流 / 近尾卡死 / 重试成串」这些
+     *      恰恰是历次 bug 的现场；用 page.route() 改写 m3u8 只能覆盖网络层，
+     *      覆盖不了「内核抛错 → Player 状态机 → UI 表象」这条链路。
+     *   2. E2E 要验的是 **Player 的状态机 / 重试 / UI 联动**，不是 hls.js 的解码。
+     *      hls.js 自身有单测，我们不需要在 E2E 里重复验证它。
+     *   3. 真流依赖网络与 CDN 稳定性，CI 上会变成 flaky 测试。
+     *
+     * MockKernel 实现 Kernel 契约，通过 createPlayer({ kernel }) 注入，
+     * 由 window.__e2e 暴露一组「场务」指令供测试脚本操纵内核行为。
+     */
+    const { createPlayer } = await import('/dist/live-sdk.es.js')
+    const { mountDefaultUI } = await import('/dist/live-sdk-ui.es.js')
+
+    /** 自动重连的计数，供断言重试次数 */
+    let reloads = []
+
+    class MockKernel {
+      static kernelName = 'mock'
+      static isSupported() { return true }
+
+      constructor(opts) {
+        this.opts = opts
+        this.media = opts.media
+        this.destroyed = false
+        this.currentUrl = ''
+        this._levels = [
+          { index: 0, height: 1080, label: '1080P' },
+          { index: 1, height: 720, label: '720P' },
+        ]
+        this._currentLevel = -1
+        this.capabilities = {
+          lowLatency: true,
+          qualitySwitch: true,
+          abr: true,
+          stats: 'full',
+          nativeFallback: false,
+        }
+        // 默认 buffered 由 window.__e2e.setBuffered 改写
+        this._buffered = [[0, 0]]
+        Object.defineProperty(this.media, 'buffered', {
+          configurable: true,
+          get: () => {
+            const rs = this._buffered
+            return {
+              length: rs.length,
+              start: (i) => rs[i][0],
+              end: (i) => rs[i][1],
+            }
+          },
+        })
+      }
+
+      async load(url) {
+        this.currentUrl = url
+        reloads.push(url)
+        // 起播成功：异步派发 manifest_parsed（模拟 manifest 解析耗时）
+        setTimeout(() => {
+          if (this.destroyed) return
+          this.opts.onEvent('manifest_parsed', { levels: this._levels })
+        }, 0)
+      }
+
+      async switchURL(url) { await this.load(url) }
+      switchQuality(i) { this._currentLevel = i; this.opts.onEvent('level_switched', { level: i }) }
+      getStats() {
+        return { bandwidth: 2_000_000, droppedFrames: 0, decodedFrames: 100, speed: 1, latency: 3 }
+      }
+      bufferInfo() {
+        // 复用 SDK 的口径：这里直接读 media.buffered 交给内核算法
+        const bufs = this._buffered
+        const cur = this.media.currentTime
+        return { behind: 0, buffers: bufs, remaining: 0, length: 0, totalRemaining: 0, totalLength: 0, ...this._bufferOverride(bufs, cur) }
+      }
+      _bufferOverride(bufs, cur) {
+        // 简化：单口径，测试主要验证「Player 是否原样透出」
+        const last = bufs[bufs.length - 1] || [0, 0]
+        return { remaining: Math.max(0, last[1] - cur), length: last[1] - last[0], totalRemaining: Math.max(0, last[1] - cur), totalLength: last[1] - last[0] }
+      }
+      getLevels() { return this._levels }
+      getCurrentLevel() { return this._currentLevel }
+      setLiveLatency() {}
+      recover() { this.opts.onEvent('manifest_parsed', { levels: this._levels }) }
+      destroy() { this.destroyed = true }
+
+      // —— 场务指令（仅供测试驱动）——
+      __emit(event, data) { this.opts.onEvent(event, data) }
+      __setBuffered(rs) { this._buffered = rs }
+    }
+
+    const player = createPlayer({
+      container: '#player',
+      kernel: MockKernel,
+    })
+
+    mountDefaultUI(player)
+
+    player.play({ url: 'https://mock/live.m3u8' })
+
+    // 把播放器与内核句柄暴露给测试脚本
+    window.__e2e = {
+      player,
+      reloads,
+      get reloadCount() { return reloads.length },
+      emit(event, data) {
+        const k = player.getKernel()
+        if (k && typeof k.__emit === 'function') k.__emit(event, data)
+      },
+      setBuffered(rs) {
+        const k = player.getKernel()
+        if (k && typeof k.__setBuffered === 'function') k.__setBuffered(rs)
+      },
+      state() { return player.getState() },
+      ready: true,
+    }
+  </script>
+</body>
+</html>

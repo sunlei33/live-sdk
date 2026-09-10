@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>live-sdk · React 无构建 demo</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; }
+    .stage { width: 640px; height: 360px; background: #000; border-radius: 8px; }
+    .controls { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+    button { padding: 6px 14px; cursor: pointer; }
+    .badge { font: 12px/1 monospace; color: #666; }
+    .tip { margin-top: 12px; font: 12px/1.5 monospace; color: #999; }
+  </style>
+</head>
+<body>
+  <h3>React 无构建接入（UMD + babel-standalone）</h3>
+  <div id="root"></div>
+
+  <!-- 1) 依赖：React UMD（全局 React / ReactDOM）+ babel-standalone（浏览器内编译 JSX） -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+  <!-- 2) 依赖：hls.js UMD（core 内核 external 它，全局 Hls） -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+
+  <!-- 3) live-sdk：core UMD + react 适配器 UMD（全局 LiveSdk / LiveSdkReact） -->
+  <script src="../dist/live-sdk.umd.js"></script>
+  <script src="../dist/live-sdk-react.umd.js"></script>
+
+  <script type="text/babel" data-presets="react">
+    const { createPlayer } = LiveSdk
+    const { usePlayer } = LiveSdkReact
+
+    const TEST_STREAM = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
+
+    function Controls({ player }) {
+      const { playing, muted, currentQuality } = usePlayer(player)
+      return (
+        <div className="controls">
+          <button onClick={() => (playing ? player.pause() : player.play())}>
+            {playing ? '暂停' : '播放'}
+          </button>
+          <button onClick={() => player.setMuted(!muted)}>
+            {muted ? '开声' : '静音'}
+          </button>
+          <span className="badge">
+            {currentQuality != null ? `清晰度 #${currentQuality}` : '清晰度自动'}
+          </span>
+        </div>
+      )
+    }
+
+    function App() {
+      const [player, setPlayer] = React.useState(null)
+      const stageRef = React.useRef(null)
+
+      React.useEffect(() => {
+        const p = createPlayer({
+          container: stageRef.current,
+          url: TEST_STREAM,
+          autoplay: true,
+          muted: true,
+        })
+        setPlayer(p)
+        return () => p.destroy()
+      }, [])
+
+      return (
+        <div>
+          <div className="stage" ref={stageRef} />
+          {player && <Controls player={player} />}
+          <div className="tip">JSX 由 babel-standalone 在浏览器内编译；player 由 createPlayer 创建，控件用 usePlayer 订阅状态。</div>
+        </div>
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
