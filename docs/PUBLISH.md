@@ -55,7 +55,54 @@ npm whoami           # 确认登录身份
 
 ---
 
-## 二、发布（推荐：用脚本）
+## 二、满足 2FA 要求（首次发布必读）
+
+npm 规定：**发布 scoped 公开包，必须满足二者之一** ——
+① 账号已启用 2FA，或 ② 使用带 **"Bypass two-factor authentication"** 的 Granular Access Token。
+
+不满足时报错：
+
+```
+npm error code E403
+npm error 403 Forbidden - PUT https://registry.npmjs.org/@<scope>%2f<pkg>
+npm error - Two-factor authentication or granular access token with bypass 2fa enabled
+         is required to publish packages.
+```
+
+先查自己的状态：
+
+```bash
+npm profile get          # 看 "two-factor auth:" 一行
+```
+
+### 情况 A：`two-factor auth: disabled`（无 2FA）
+
+此时**没有认证器可生成 OTP**，`--otp=` 方案无法使用，**只能走 Granular Access Token**：
+
+1. 打开 https://www.npmjs.com/settings/sunlei33/tokens → **Generate New Token** → 选 **Granular Access Token**
+2. 关键配置：
+   - **Bypass two-factor authentication** → ✅ **必须勾选**（这是本次 403 的解法）
+   - **Packages and scopes** → Permissions 选 **Read and write**，Scope 选中你的 `@<scope>`
+   - Expiration / Allowed IP ranges 按需设置
+3. Generate Token 后**立即复制**（只显示一次）
+4. 写入 npm 配置（覆盖掉 `npm login` 留下的那个无 bypass 权限的 token）：
+
+```bash
+npm config set //registry.npmjs.org/:_authToken=<你的token>
+```
+
+> 该 token 等同密码，切勿提交到仓库。若想避免落盘，可改用环境变量：
+> 在项目 `.npmrc` 写 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`，发布前 `export NPM_TOKEN=...`。
+
+### 情况 B：已启用 2FA
+
+每次发布会需要一枚 6 位 OTP。**不要**把 OTP 传给 `--otp` 后干等——TOTP 只有 30 秒有效期，而质量门要跑 40 秒以上，等轮到时早已过期。
+
+正确做法：**直接 `npm run release`**，脚本会在真正执行 `npm publish` 的前一刻提示你输入 OTP。
+
+---
+
+## 三、发布（推荐：用脚本）
 
 ```bash
 # 1) 先演练一遍：走完校验 + 预览 tarball，不上传
@@ -64,11 +111,12 @@ npm run release:dry
 # 2) 正式发布
 npm run release
 
-# 开了两步验证（2FA）的话，把一次性口令一起传进去
-npm run release -- --otp=123456
-
 # CI / 无交互终端：加 --yes 明确确认（否则脚本会拒绝发布）
 npm run release -- --yes
+
+# 已开 2FA 时不要预先传 --otp（质量门耗时会让口令过期），
+# 脚本会在 publish 前一刻提示输入；仅自动化场景才用：
+npm run release -- --otp=123456
 ```
 
 脚本 `scripts/publish.mjs` 会依次做：
@@ -78,7 +126,8 @@ npm run release -- --yes
 3. **预览** —— `npm pack --dry-run`，列出将要上传的每个文件与体积
 4. **确认** —— 输入 `y` 才继续
 5. **发布** —— `npm publish --ignore-scripts`
-6. **（可选）打 tag** —— 询问是否为本次发布创建 `v0.1.0` 并推送到 origin
+6. **2FA 失败时给诊断** —— 识别 403/2FA 报错：账号无 2FA 时直接给 GAT 配置步骤；有 2FA 时当场索要 OTP 并立即重试（见第二节）
+7. **（可选）打 tag** —— 询问是否为本次发布创建 `v0.1.0` 并推送到 origin
 
 其他参数：`--skip-gate` 跳过质量门（不推荐）、`--yes` 跳过交互确认、`--help` 查看用法。
 
@@ -87,7 +136,7 @@ npm run release -- --yes
 
 ---
 
-## 三、不用脚本的等价命令
+## 四、不用脚本的等价命令
 
 ```bash
 npm test && npm run build && npm run verify   # 质量门
@@ -97,7 +146,7 @@ npm publish                                   # 裸发布（prepublishOnly 会�
 
 ---
 
-## 四、发布后
+## 五、发布后
 
 ```bash
 npm view @fancaf/live-sdk version             # 验证已上线
@@ -106,7 +155,7 @@ npm i @fancaf/live-sdk                        # 消费者安装
 
 ---
 
-## 五、版本迭代
+## 六、版本迭代
 
 ```bash
 npm version patch -m "release: v%s"   # 0.1.0 → 0.1.1（bugfix）
@@ -121,7 +170,7 @@ npm run release                       # 再走一遍发布脚本
 
 ---
 
-## 六、本次随附的配置修正
+## 七、本次随附的配置修正
 
 - **补 `peerDependencies`**：`react>=17` / `vue>=3`（optional）。此前只有 `peerDependenciesMeta` 而无对应 `peerDependencies`，等于没生效，消费者装 `live-sdk/react` 时拿不到版本提示。
 - **补 `repository` / `homepage` / `bugs`**：指向 https://github.com/sunlei33/live-sdk。

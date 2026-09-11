@@ -47,9 +47,14 @@ for (const arg of argv) {
         '用法：',
         '  npm run release                 # 正式发布',
         '  npm run release:dry             # 演练（不上传、不打 tag）',
-        '  npm run release -- --otp=123456 # 2FA 一次性口令',
+        '  npm run release -- --otp=123456 # 2FA 一次性口令（须新鲜，见下）',
         '  npm run release -- --yes        # 跳过交互确认（非 TTY 环境必需）',
         '  npm run release -- --skip-gate  # 跳过质量门（不推荐）',
+        '',
+        '2FA 说明：',
+        '  发布 scoped 公开包要求「账号已开 2FA」或「带 bypass 2FA 的 Granular Access Token」。',
+        '  · 账号未开 2FA → 只能走 GAT 方案（脚本会给出具体步骤）。',
+        '  · 账号已开 2FA → 建议不传 --otp，脚本会在 publish 前一刻提示输入，避免 OTP 过期。',
         '',
       ].join('\n'),
     )
@@ -80,6 +85,19 @@ function run(cmd, args = [], opts = {}) {
 function capture(cmd) {
   const r = spawnSync(cmd, { shell: true, encoding: 'utf8' })
   return r.status === 0 ? (r.stdout || '').trim() : null
+}
+/** 执行并把输出同时回显到终端 + 捕获（用于识别 2FA 类失败并重试） */
+function runCapture(cmd, args = []) {
+  const r = spawnSync(cmd, args, { shell: true, encoding: 'utf8' })
+  const out = `${r.stdout || ''}${r.stderr || ''}`
+  if (out) process.stdout.write(out)
+  return { ok: r.status === 0, out }
+}
+/** 读取账号的 2FA 状态：'auth-and-writes' | 'auth-only' | 'disabled' | null(未知) */
+function twoFactorStatus() {
+  const r = spawnSync('npm', ['profile', 'get'], { shell: true, encoding: 'utf8' })
+  const m = `${r.stdout || ''}`.match(/two-factor auth:\s*(\S+)/i)
+  return m ? m[1] : null
 }
 
 // ── 交互确认 ──
@@ -201,7 +219,35 @@ closeRl()
 
 // ═══ 5. 发布 ═══
 bold('5) 发布')
-if (!run('npm', ['publish', '--ignore-scripts', ...publishArgs])) die('发布失败')
+let res = runCapture('npm', ['publish', '--ignore-scripts', ...publishArgs])
+
+// 2FA / 权限类失败：给出精确诊断，而不是笼统报「发布失败」
+if (!res.ok && /two-factor authentication|EOTP/i.test(res.out)) {
+  const tfa = twoFactorStatus()
+  console.log()
+  if (!tfa || tfa === 'disabled') {
+    warn(`诊断：账号 two-factor auth = ${tfa ?? '未知'}，无法用 --otp 通过校验。`)
+    info('该 scope 发布要求「2FA」或「带 bypass 2FA 的 Granular Access Token」，二选一：')
+    console.log()
+    info('A. 建 Granular Access Token 并勾选 Bypass 2FA（推荐：一次配置，长期免交互）')
+    info(`   https://www.npmjs.com/settings/${whoami ?? '<用户名>'}/tokens → Generate New Token`)
+    info('   · Packages and scopes → Read and write → 选中你的 scope')
+    info('   · 勾选 "Bypass two-factor authentication"')
+    info('   生成后执行：npm config set //registry.npmjs.org/:_authToken=<token>')
+    console.log()
+    info('B. 给账号开启 2FA（选 auth-and-writes），之后每次发布在脚本提示时输入 6 位 OTP')
+    info(`   https://www.npmjs.com/settings/${whoami ?? '<用户名>'}/profile → Two-factor authentication`)
+    die('发布失败：账号未开启 2FA，且当前 token 不具备 bypass 2FA 权限')
+  }
+  // 已启用 2FA：立即取一枚新鲜 OTP 重试（此时距 publish 仅数秒，不会因质量门耗时而过期）
+  warn('需要一次性口令（OTP）。')
+  const otp = (await ask('  请输入 6 位 OTP（认证器 App，直接回车取消）：')).replace(/\s/g, '')
+  if (otp) {
+    res = runCapture('npm', ['publish', '--ignore-scripts', ...publishArgs, `--otp=${otp}`])
+  }
+}
+closeRl()
+if (!res.ok) die('发布失败')
 ok(`已发布：${name}@${version}`)
 info(`验证：npm view ${name} version`)
 info(`安装：npm i ${name}`)
