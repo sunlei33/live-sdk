@@ -78,4 +78,5 @@ export const DEFAULT_CONFIG: Required<PlayerConfig> = {
   network: { ...DEFAULT_NETWORK_STRATEGY },
   observability: 'full',
   env: undefined,
+  posterMode: 'native',
 } as unknown as Required<PlayerConfig>

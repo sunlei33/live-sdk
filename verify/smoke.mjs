@@ -21,6 +21,7 @@ function makeEl(tag) {
     currentSrc: '',
     videoWidth: 0,
     videoHeight: 0,
+    duration: NaN, // 真实 <video> 元数据未就绪时为 NaN
     buffered: { length: 0, start: () => 0, end: () => 0 },
     // 方法
     setAttribute(k, v) { this.attributes[k] = v },
@@ -359,6 +360,132 @@ check('error 事件的 PlayerError 携带 diagnostic', errWithDiag !== null && e
 // 17. 销毁
 p.destroy()
 check('destroy 后 root 已移除', true)
+
+// ══════════ 18~22：autohome 业务反馈修复项（0.2.0） ══════════
+
+// 18. 修复验证：错误码映射大小写不敏感
+//     病灶：mapErrorCode 只匹配大写（MANIFEST/FRAG/NETWORK），而 hls.js 的 details
+//     是 camelCase（manifestLoadError）→ 全部落 UNKNOWN，打穿「接口/CDN 异常可观测」。
+{
+  const CamelKernel = class {
+    static kernelName = 'CamelKernel'
+    static isSupported() {
+      return true
+    }
+    constructor(opts) {
+      this.opts = opts
+      this.capabilities = { lowLatency: false, qualitySwitch: false, abr: false, stats: 'basic', nativeFallback: false }
+    }
+    async load() {
+      // 与 hls.js 的 ERROR 事件同构：details 为 camelCase，HTTP 状态在 response.code
+      this.opts.onEvent('error', {
+        fatal: true,
+        details: 'manifestLoadError',
+        type: 'networkError',
+        message: 'manifest load failed',
+        response: { code: 404 },
+      })
+    }
+    async switchURL() {}
+    switchQuality() {}
+    getStats() {
+      return {}
+    }
+    bufferInfo() {
+      return { buffers: [], remaining: 0, length: 0, totalRemaining: 0, totalLength: 0, behind: 0 }
+    }
+    recover() {}
+    destroy() {}
+  }
+  const pErr = createPlayer({ container: '#playerErr', kernel: CamelKernel })
+  let got = null
+  pErr.on('error', (e) => {
+    got = e
+  })
+  await pErr.play('https://cdn/err.m3u8')
+  check('camelCase details 不再落 UNKNOWN（manifestLoadError → manifest_404）', got?.code === 'manifest_404')
+  check('camelCase + fatal=true 正确判为 fatal（原实现恒 false）', got?.fatal === true)
+  pErr.destroy()
+}
+
+// 19. 修复验证：PlayerState 补进度字段（currentTime / duration，按整秒节流）
+{
+  const pProg = createPlayer({ container: '#playerProg' })
+  const st0 = pProg.getState()
+  check('初始 currentTime=0 / duration=0', st0.currentTime === 0 && st0.duration === 0)
+  const v = els['video']
+  v.currentTime = 5.4
+  v.duration = Infinity
+  v._fire('timeupdate')
+  const st1 = pProg.getState()
+  check('timeupdate 同步 currentTime', Math.abs(st1.currentTime - 5.4) < 0.001)
+  check('直播 duration=Infinity 如实透传', st1.duration === Infinity)
+  pProg.destroy()
+}
+
+// 20. 修复验证：autoplay:false = 只加载不自动起播
+{
+  els['video'].paused = true // 复位共享替身（smoke 的 createElement 按 tag 记忆化）
+  const pNoAuto = createPlayer({ container: '#playerNoAuto', kernel: sdk.NativeKernel })
+  await pNoAuto.play({ url: 'https://cdn/noauto.m3u8', autoplay: false })
+  check('autoplay:false 时 playing 保持 false', pNoAuto.getState().playing === false)
+  check('autoplay:false 时 <video> 未被 play()', els['video'].paused === true)
+  pNoAuto.destroy()
+}
+
+// 21. 修复验证：业务态扩展位可写（app.* 命名空间）
+{
+  const pApp = createPlayer({ container: '#playerApp' })
+  const warns = []
+  const orig = console.warn
+  // logger 以 fn(PREFIX, ...args) 形式调用，故需聚合全部参数再匹配
+  console.warn = (...a) => warns.push(a.map(String).join(' '))
+  pApp.setAppState({ 'app.roomId': 'room-1' })
+  pApp.setAppState({ playing: true }) // 非法键：应被忽略
+  console.warn = orig
+  check('setAppState 写入 app.* 并出现在快照', pApp.getState()['app.roomId'] === 'room-1')
+  check('setAppState 拒绝非 app.* 键（内核字段不被覆盖）', pApp.getState().playing === false)
+  check('非法键有告警', warns.some((w) => w.includes('setAppState')))
+  pApp.destroy()
+}
+
+// 22. 修复验证：registerPlugin 兼容构造器与实例
+{
+  class ProbeA {
+    constructor() {
+      this.name = 'probeA'
+    }
+    create() {}
+    init() {}
+    ready() {}
+    destroy() {}
+  }
+  class ProbeB {
+    constructor() {
+      this.name = 'probeB'
+    }
+    create() {}
+    init() {}
+    ready() {}
+    destroy() {}
+  }
+  const pPl = createPlayer({ container: '#playerPl' })
+  const mine = new ProbeA()
+  check('registerPlugin(实例) 复用同一对象', pPl.registerPlugin(mine) === mine)
+  check('registerPlugin(构造器) 由 SDK 实例化', pPl.registerPlugin(ProbeB) instanceof ProbeB)
+  pPl.destroy()
+}
+
+// 23. 修复验证：posterMode='overlay' 封面图层显示/隐藏
+{
+  const pPoster = createPlayer({ container: '#playerPoster', posterMode: 'overlay' })
+  await pPoster.play({ url: 'https://cdn/poster.m3u8', poster: 'https://img/cover.jpg' })
+  const img = els['img']
+  check('overlay 模式创建封面图层并显示', !!img && img.src === 'https://img/cover.jpg' && img.style.display === 'block')
+  els['video']._fire('playing')
+  check('起播后封面图层隐藏', img.style.display === 'none')
+  pPoster.destroy()
+}
 
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)
 process.exit(failures === 0 ? 0 : 1)

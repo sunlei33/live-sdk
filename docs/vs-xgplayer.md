@@ -57,6 +57,10 @@
 
 > **建议**：把「不支持点播」在 spec 中从「Non-Goal」升级为「**技术选型的显式代价**」，并给出扩展路径（挂 `DashKernel`/VOD 内核 or 换 mpegts.js）。理由：Non-Goal 读起来像「暂时不做」，而真相是「与 headless 单内核架构存在张力」。
 
+> **边界澄清（0.2.0）**：live-sdk 现已把 `currentTime` / `duration` 放进状态快照（业务实测需要进度做状态展示与埋点），
+> 但**这只是直播流的读数，不是时间轴操作能力**——仍不提供 `seek` / 倍速，仍不支持渐进式 `.mp4`。
+> 不要因为「有 currentTime 了」就以为可以画可拖拽进度条：直播时间轴受 live edge 约束，拖拽无意义（详见 README 能力边界的类型一）。
+
 ### 1.3 选型差异导致的 issue 类型对照
 
 | issue 主题 | xgplayer 是否遇到 | live-sdk 是否可能遇到 | 说明 |
@@ -78,10 +82,11 @@
 | **初始化** | `createPlayer({ container, url, kernel, preset, hlsConfig })` —— 工厂函数，显式注入内核 | `new Player({ id, url, ... })` —— 类构造，内核由 `presets`/`ignores` 隐式决定 |
 | **内核选择** | 显式：`kernel: HlsKernel`，缺省 sniffer 自动选 | 隐式：靠引入哪个插件包（`xgplayer-hls` / `xgplayer-flv`）自动注册 |
 | **UI** | 完全外置（`live-sdk/ui` 独立包），可不用 | 内建，`preset` 决定挂哪些控件 |
-| **命令** | `play(config?)` / `pause()` / `seek(t)` / `switchURL(url)` / `switchQuality(id)` / `mute()` / `report()` | `play()` / `pause()` / `seek()` / `switchUrl()` / `switchDefinition()` / `retry()` / `replay()` / `destroy()` |
-| **状态查询** | `getState()` 返回快照对象（`playing` 等语义字段） | 直接读实例属性（`player.paused` / `player.currentTime`），状态散落 |
-| **事件** | 统一点分号常量，`on/off/once`，含语义化事件（`first_frame`/`stalled`/`recovered`/`retry`） | 常量导出（`Events.PLAY` 等），**大量底层 media 事件直接透传**（`waiting`/`seeking`/`canplay`…） |
-| **插件** | `registerPlugin/unregisterPlugin` + `BasePlugin` 生命周期 | `BasePlugin` + `Plugin` + `presets` + `ignores`，生态更成熟 |
+| **命令** | `play(config?)` / `pause()` / `switchURL(url)` / `switchQuality(id)` / `mute()` / `setAppState()` / `report()` | `play()` / `pause()` / `seek()` / `switchUrl()` / `switchDefinition()` / `retry()` / `replay()` / `destroy()` |
+| **状态查询** | `getState()` 返回快照对象（`playing` / `currentTime` / `duration` 等语义字段） | 直接读实例属性（`player.paused` / `player.currentTime`），状态散落 |
+| **事件** | 统一点分号常量，`on/off/once`，含语义化事件（`first_frame`/`stalled`/`recovered`/`retry`/`live_status`） | 常量导出（`Events.PLAY` 等），**大量底层 media 事件直接透传**（`waiting`/`seeking`/`canplay`…） |
+| **插件** | `registerPlugin/unregisterPlugin` + `BasePlugin` 生命周期；注册入参**构造器或实例皆可** | `BasePlugin` + `Plugin` + `presets` + `ignores`，生态更成熟 |
+| **封面图** | `poster` + `posterMode: 'native' \| 'overlay'`（MSE 路径可用 DOM 图层） | 内建 poster，与自研 UI 强耦合 |
 | **Hooks** | `useHooks(name, fn)` | `useHooks` / `usePluginHooks` / `runHooks`（粒度更细，但 #1773 报过 hook 报错） |
 | **扩展配置** | `hlsConfig` 透传（escape hatch） | 直接展开进 options，配置项数百个（文档不全，#1867 抱怨过） |
 
@@ -90,6 +95,7 @@
 | 维度 | live-sdk 更优 | xgplayer 更优 |
 |---|---|---|
 | **API 一致性** | ✅ 命令/状态/事件三契约统一，`getState()` 单一真源 | ❌ 状态散落实例属性，部分靠 DOM class |
+| **异常可观测** | ✅ 统一 `ERROR_CODE` + 内核 details 归一（大小写不敏感、404 取 HTTP 状态码）+ 重试诊断快照（地址 / 网络 / 第几次） | ⚠️ 错误码与底层 details 混合暴露，接入方需自行分类与拼装上下文 |
 | **语义清晰度** | ✅ `playIntent` 等业务语义显式建模 | ⚠️ 语义隐含在 `paused`/`ended` 属性 |
 | **上手成本** | ✅ 配置项少、文档聚焦 | ⚠️ 配置项极多，文档滞后于源码 |
 | **生态/示例** | ❌ 无 | ✅ 官方文档站、大量 fixtures demo、多语言 i18n（15 种语言） |

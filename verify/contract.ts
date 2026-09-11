@@ -22,6 +22,7 @@ import type {
   NetworkQuality,
   PlayerState,
   KernelCapabilities,
+  LiveStatusPayload,
 } from 'live-sdk'
 
 // ══════════ 场景 1：纯 H5 + 默认 UI（assets/web-default.html） ══════════
@@ -186,6 +187,46 @@ const sentryLike: SentryLike = {
 }
 player.registerPlugin(SentryReporter, { sentry: sentryLike })
 
+// ══════════ 场景 10：业务反馈修复项的 API 契约（0.2.0） ══════════
+// 10.1 封面图叠加层（P0-2）
+const player3 = createPlayer({
+  container: '#player3',
+  posterMode: 'overlay', // 'native' | 'overlay'
+})
+const posterModeNative: 'native' | 'overlay' = 'native'
+
+// 10.2 PlayConfig.autoplay：false = 只加载不自动播（P1-2）
+const noAutoPlay: PlayConfig = { url: 'https://live.m3u8', autoplay: false }
+void player3.play(noAutoPlay)
+
+// 10.3 PlayerState 进度字段（P1-1）：直播 duration 为 Infinity
+const progress: PlayerState = player3.getState()
+const curTime: number = progress.currentTime
+const dur: number = progress.duration
+void curTime
+void dur
+
+// 10.4 业务态扩展位可写（P2-2）
+player3.setAppState({ 'app.roomId': 'room-1', 'app.muted.byUser': true })
+const roomId = player3.getState()['app.roomId']
+
+// 10.5 live_status 结构化 payload（P2-2）
+player3.on('live_status', (payload) => {
+  const p = payload as LiveStatusPayload
+  const s: string = p.status
+  const prev: string = p.previousStatus
+  const raw: Record<string, unknown> = p.raw
+  const at: number = p.time
+  void s
+  void prev
+  void raw
+  void at
+})
+
+// 10.6 registerPlugin 兼容构造器与实例（P2-1）
+player3.registerPlugin(NativeReporter) // 构造器
+player3.registerPlugin(new NativeReporter()) // 实例
+
 export {
   eqFirstFrame,
   eqFeatures,
@@ -195,9 +236,12 @@ export {
   obsBasic,
   player,
   player2,
+  player3,
   snapshot,
   cur,
   caps,
   jsBridgeEnv,
   NativeReporter,
+  posterModeNative,
+  roomId,
 }

@@ -1,6 +1,6 @@
 {
   "name": "@fancaf/live-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "H5 live-streaming player SDK (HLS + fMP4 + hls.js, headless kernel + plugin architecture)",
   "type": "module",
   "sideEffects": false,

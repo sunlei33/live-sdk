@@ -25,6 +25,7 @@ export { ConsoleReporter } from './reporter/ConsoleReporter'
 export { SentryReporter } from './reporter/SentryReporter'
 export type { SentryLike } from './reporter/SentryReporter'
 export { LivePolling } from './plugins/LivePolling'
+export type { LiveStatus } from './plugins/LivePolling'
 
 // —— 常量 ——
 export { Events, ERROR_CODE } from './constants'
@@ -60,12 +61,16 @@ export type {
   SideState,
   FeatureStatus,
   FeatureStatusReport,
+  LiveStatusPayload,
+  AppStateKey,
   PlayerError,
   RetryDiagnostic,
   ReportRecord,
   PlayerConfig,
+  PosterMode,
   PluginLifecycle,
   Plugin,
   PluginConstructor,
+  PluginInput,
   ReporterPlugin,
 } from './types'

@@ -15,7 +15,9 @@ import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../utils/sniffe
 import { logger } from '../utils/logger'
 import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/retry'
 import { matchFeature } from '../utils/features'
+import { mapErrorCode, isFatalKernelError } from '../utils/errors'
 import type {
+  AppStateKey,
   BufferInfo,
   EnvAdapter,
   FeatureStatus,
@@ -33,6 +35,8 @@ import type {
   PlayInput,
   PlayerError,
   PlayerState,
+  Plugin,
+  PluginInput,
   Quality,
   ReportRecord,
   RetryDiagnostic,
@@ -93,6 +97,8 @@ export class Player {
   private firstFrameEmitted = false
   private loadTimeoutTimer: number | null = null
   private disposedSubs: Array<() => void> = []
+  private posterEl: HTMLImageElement | null = null // overlay 模式的封面图层（懒建）
+  private progressSecond = -1 // 已同步到快照的整秒位置（节流用）
 
   constructor(config: PlayerConfig) {
     // 1. 解析容器
@@ -127,6 +133,8 @@ export class Player {
       muted: this.mediaProxy.muted,
       qualities: [],
       currentQuality: null,
+      currentTime: 0,
+      duration: 0,
       capabilities: this.emptyCapabilities(),
     }
     this.state = new StateStore(initial)
@@ -196,13 +204,20 @@ export class Player {
     this.currentPlayConfig = cfg
     const muted = cfg.muted ?? this.config.muted ?? false
     this.mediaProxy.muted = muted
-    this.mediaProxy.poster = cfg.poster
-    this.state.set({ muted })
+    this.applyPoster(cfg.poster)
+    // 新一轮起播：进度归零，等待 loadedmetadata/timeupdate 回填
+    this.progressSecond = -1
+    this.state.set({ muted, currentTime: 0, duration: 0 })
     this.startLivePollingIfNeeded()
 
     this.retryCount = 0
     this.mediaPaused = false // 新一轮起播，重置暂停兜底标志
-    this.playIntent = true // 显式起播 = 意图播放（断流重连后据此还原按钮）
+    // 播放意图 = 本次起播是否「自动开始播放」。
+    // `PlayConfig.autoplay: false` 的语义是「只加载、不自动播」（典型场景：先呈现封面图，
+    // 等用户手势再播），因此意图为负 —— 不自动 play()、按钮保持「播放」态；
+    // 之后业务显式调用 `play()`（无参）走恢复分支，再把意图转正。
+    // 缺省（undefined）视为 true：调用 play() 本身就是播放意图，保持既有行为不变。
+    this.playIntent = cfg.autoplay !== false
     this.emit(Events.LOAD_START, { url: cfg.url })
     this.stateMachine.transition('load')
 
@@ -276,6 +291,34 @@ export class Player {
     return this.state.get()
   }
 
+  /**
+   * 写入**业务扩展状态**（`PlayerState` 的 `app.*` 命名空间，§3.7）。
+   *
+   * 内核只保证 `app.` 前缀字段不被自己读写，命名与结构完全由业务/插件决定；
+   * 写入后照常触发 `subscribe` 全量快照回调，因此能自然驱动 React/Vue 重渲染。
+   *
+   * ```ts
+   * player.setAppState({ 'app.muted.byUser': true, 'app.roomId': '123' })
+   * player.getState()['app.roomId'] // '123'
+   * ```
+   *
+   * @throws 不会抛错：非 `app.` 前缀的键会被**忽略并告警**（运行时兜底，
+   *         防止无类型约束的 JS 调用方覆盖 `playing`/`muted` 等内核字段）。
+   */
+  setAppState(patch: Record<AppStateKey, unknown>): void {
+    const safe: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(patch)) {
+      if (!k.startsWith('app.')) {
+        // 前缀由 logger 统一补（[live-sdk]），此处只给模块标签
+        logger.warn(`[state] setAppState 忽略非 app.* 键：${k}`)
+        continue
+      }
+      safe[k] = v
+    }
+    if (Object.keys(safe).length === 0) return
+    this.state.set(safe as Partial<PlayerState>)
+  }
+
   subscribe(cb: (s: PlayerState) => void): () => void {
     return this.state.subscribe(cb)
   }
@@ -347,8 +390,15 @@ export class Player {
 
   // ═══════════════ 插件 / 钩子 ═══════════════
 
-  registerPlugin(Ctor: { new (): unknown }, config?: unknown): unknown {
-    return this.plugins.add(Ctor as never, config)
+  /**
+   * 注册插件：**构造器或实例皆可**（§3.6）。
+   * - `registerPlugin(SentryReporter, { sentry })` —— 传构造器
+   * - `registerPlugin(new SentryReporter(), { sentry })` —— 传实例
+   *
+   * 两种形态都会走 `create(player)` → `init(config)`，业务不要自行预先 register。
+   */
+  registerPlugin(plugin: PluginInput, config?: unknown): Plugin {
+    return this.plugins.add(plugin, config)
   }
 
   unregisterPlugin(name: string): void {
@@ -407,6 +457,7 @@ export class Player {
     this.kernel = null
     this.plugins.destroyAll()
     this.mediaProxy.destroy()
+    this.destroyPosterEl()
     this.root.remove()
     this.state.destroy()
     this.hooks.destroy()
@@ -502,21 +553,19 @@ export class Player {
   }
 
   private onKernelError(data?: unknown): void {
-    const d = (data ?? {}) as { fatal?: boolean; details?: string; type?: string; message?: string }
+    const d = (data ?? {}) as {
+      fatal?: boolean
+      details?: string
+      type?: string
+      message?: string
+      response?: { code?: number }
+    }
     const details = d.details ?? ''
-    const fatal =
-      d.fatal === true &&
-      (details.includes('MANIFEST') || details.includes('CODEC') || details.includes('KEY') || d.type === 'mediaError')
-    const code = this.mapErrorCode(details)
+    const fatal = isFatalKernelError(details, d.type, d.fatal === true)
+    // HTTP 状态码：hls.js 放在 data.response.code，不在 details 里。
+    // 不取它则 404 无法从 details 识别（details 恒为 manifestLoadError）。
+    const code = mapErrorCode(details, d.response?.code)
     this.dispatchError(this.makeError(code, d.message ?? details, fatal))
-  }
-
-  private mapErrorCode(details: string): string {
-    if (details.includes('MANIFEST') && details.includes('404')) return ERROR_CODE.MANIFEST_404
-    if (details.includes('MANIFEST')) return ERROR_CODE.MANIFEST_LOAD_ERROR
-    if (details.includes('FRAG')) return ERROR_CODE.FRAG_LOAD_ERROR
-    if (details.includes('NETWORK')) return ERROR_CODE.NETWORK_ERROR
-    return ERROR_CODE.UNKNOWN
   }
 
   // ═══════════════ 内部：media 原生事件 ═══════════════
@@ -531,9 +580,12 @@ export class Player {
     on('loadedmetadata', () => {
       // 原生回退路径的「就绪」信号
       if (this.stateMachine.current === 'loading') this.onManifestParsed({})
+      this.syncProgress()
     })
     on('loadeddata', () => this.emitFirstFrame())
     on('canplay', () => this.emitFirstFrame())
+    on('timeupdate', () => this.syncProgress())
+    on('durationchange', () => this.syncProgress())
     on('playing', () => this.onMediaPlaying())
     on('pause', () => this.onMediaPause())
     on('waiting', () => this.onStall())
@@ -553,6 +605,8 @@ export class Player {
 
   private onMediaPlaying(): void {
     this.playIntent = true // 媒体真的在播 → 意图同步为正
+    // 每次起播（含二次 play/换源）都会派发 playing：封面图层真正的收口点
+    this.hidePosterOverlay()
     if (this.stateMachine.current === 'stalled') {
       this.stateMachine.transition('recovered')
       this.emit(Events.RECOVERED)
@@ -643,9 +697,87 @@ export class Player {
   private emitFirstFrame(): void {
     if (this.firstFrameEmitted) return
     this.firstFrameEmitted = true
+    this.hidePosterOverlay()
     this.emit(Events.FIRST_FRAME, { time: Date.now() })
     this.plugins.readyAll()
     this.kernelReady = true
+  }
+
+  // ═══════════════ 内部：封面图层（posterMode） ═══════════════
+
+  /**
+   * 应用封面图。两种模式（§4.1 PlayerConfig.posterMode）：
+   * - `native`：写 `<video>.poster`，交给浏览器原生呈现（历史行为）。
+   * - `overlay`：在 root 内叠一层 `<img>`，首帧呈现后隐藏。
+   *   MSE 路径推荐——hls.js 接管 `<video>.src` 为 `blob:` 后原生 poster 不可靠。
+   */
+  private applyPoster(poster?: string): void {
+    if (this.config.posterMode !== 'overlay') {
+      this.mediaProxy.poster = poster
+      return
+    }
+    // overlay 模式不写 video.poster，避免与图层重复呈现
+    if (!poster) {
+      this.hidePosterOverlay()
+      return
+    }
+    const el = this.ensurePosterEl()
+    el.src = poster
+    el.style.display = 'block'
+    // 注意：不要重置 firstFrameEmitted —— 它还兼作 plugins.readyAll()/kernelReady 的一次性闸门。
+    // 二次起播时 emitFirstFrame 不再触发，改由 onMediaPlaying（playing 事件，每次起播都会派发）兜底隐藏。
+  }
+
+  private ensurePosterEl(): HTMLImageElement {
+    if (this.posterEl) return this.posterEl
+    const el = document.createElement('img')
+    el.className = 'live-sdk-poster'
+    Object.assign(el.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      objectFit: 'cover',
+      display: 'none',
+      // 低于默认控件层（UIMount 的 controls bar 为 z-index:10），不遮挡操作
+      zIndex: '1',
+    })
+    el.setAttribute('alt', '')
+    this.root.appendChild(el)
+    this.posterEl = el
+    return el
+  }
+
+  /** 隐藏封面图层（幂等）。首帧呈现、进入播放时调用。 */
+  private hidePosterOverlay(): void {
+    if (this.posterEl) this.posterEl.style.display = 'none'
+  }
+
+  private destroyPosterEl(): void {
+    this.posterEl?.remove()
+    this.posterEl = null
+  }
+
+  // ═══════════════ 内部：播放进度同步 ═══════════════
+
+  /**
+   * 把播放位置/时长同步到快照（`PlayerState.currentTime` / `duration`）。
+   *
+   * **节流**：仅在「整秒位置变化」或「duration 变化」时才写快照 ——
+   * `timeupdate` 约 4Hz，直接写会让订阅方（React/Vue 组件）被高频重渲染；
+   * 快照定位是低频字段（StateStore 注释），逐帧精度请读 `player.media.currentTime`。
+   */
+  private syncProgress(): void {
+    const t = this.media.currentTime || 0
+    const second = Math.floor(t)
+    const raw = this.media.duration
+    // 直播：duration 恒为 Infinity（HTMLMediaElement 规范），如实透传；
+    // 元数据未就绪：NaN；老浏览器/极简 DOM 替身可能为 undefined → 统一归一为 0，
+    // 避免业务侧渲染出 NaN/undefined。
+    const duration = typeof raw === 'number' && !Number.isNaN(raw) ? raw : 0
+    if (second === this.progressSecond && duration === this.state.get().duration) return
+    this.progressSecond = second
+    this.state.set({ currentTime: t, duration })
   }
 
   // ═══════════════ 内部：自动播放 / 状态机副作用 ═══════════════

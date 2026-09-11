@@ -58,14 +58,17 @@
   4. `setVolume(v)` 与滑块双向同步（外部调用 `setVolume` 时滑块位置跟随更新）。
   5. 音量范围钳制在 `[0, 1]`，越界值不产生异常。
 
-### US-04 懒实例化：autoplay=false 时不自动起播
-- **目标**：验证 `autoplay:false` 时不发起加载，等显式 `play()`。
+### US-04 懒实例化：`PlayerConfig.autoplay=false` 时不自动起播
+- **目标**：验证 **构造函数级** `autoplay:false` 时不发起加载，等显式 `play()`。
 - **配置**：`{ container:'#player', url:'…m3u8' }`（不传 autoplay）。
 - **交互**：打开页面 → 静置 3s → 读取状态。
 - **预期**：
   1. 3s 内 `player.getState().playing === false`。
   2. 未发起 m3u8 网络请求（Network 面板无对应请求）。
   3. 调用 `player.play()` 后正常起播，返回 `Promise<void>`。
+
+> 注意与 US-39 区分：本用例是**构造级**开关（createPlayer 后要不要自动 play）；
+> US-39 是**起播级**开关（这一次 play() 里要不要自动播放）。两者语义正交，不可混用。
 
 ### US-05 暂停后恢复播放（`play()` 无参双语义）
 
@@ -114,13 +117,16 @@
 
 ### US-08 直播状态轮询（liveStatus）
 
-- **目标**：区分「未开播 / 直播中 / 已结束」。
+- **目标**：区分「未开播 / 直播中 / 已结束」，并拿到结构化 payload。
 - **配置**：provider 返回 `{ liveStatus: '/api/live/status' }`。
-- **交互**：接口分别返回「未开播」「直播中」「已结束」三种状态。
+- **交互**：接口分别返回「未开播」「直播中」「已结束」三种状态（可附带业务自定义字段）。
 - **预期**：
-  1. 状态变化经事件对外通知（`live_status`）。
-  2. 未开播时展示封面（`poster`）而非黑屏报错。
-  3. 轮询有节流，非高频轰炸接口。
+  1. 状态变化经事件对外通知（`live_status`），**仅在值变化时派发**（同值重复轮询不重复派发）。
+  2. payload 为结构化对象：`{ status, previousStatus, raw, time }`。
+  3. `raw` 为服务端原始响应**原样透传**——业务自定义字段（如主播信息、预计恢复时间）可直接取用，无需 SDK 改版。
+  4. `previousStatus` 首次派发为空串，之后为上一次的值。
+  5. 未开播时展示封面（`poster`）而非黑屏报错。
+  6. 轮询有节流（默认 25s），非高频轰炸接口；失败静默退避。
 
 ---
 
@@ -325,11 +331,16 @@
 ### US-23 扩展状态命名空间
 
 - **目标**：插件/业务可往状态里加 `app.*` 字段而不被内核覆盖。
-- **配置**：自定义插件写入 `state['app.foo']`。
-- **交互**：读取 `player.getState()['app.foo']`。
+- **配置**：默认。
+- **交互**：
+  1. `player.setAppState({ 'app.foo': 1, 'app.roomId': 'r1' })`。
+  2. 读取 `player.getState()['app.foo']`。
+  3. 尝试写入内核字段：`player.setAppState({ playing: true })`。
 - **预期**：
-  1. `app.*` 字段被保留。
+  1. `app.*` 字段被写入快照，`subscribe` 回调收到含该字段的全量快照（可用于驱动框架重渲染）。
   2. 内核不预设、不覆盖该命名空间。
+  3. **非 `app.*` 键被忽略**：`playing` 等内核字段值不变，且控制台出现一条告警（运行时兜底，防 JS 调用方绕过类型约束）。
+  4. 空 patch 不触发 `subscribe` 回调。
 
 ---
 
@@ -520,8 +531,76 @@
 
 ---
 
-## 附录：验收环境建议
+## 十一、业务实测反馈修复（0.2.0）
 
+### US-39 起播级 autoplay：只加载不自动播
+
+- **目标**：`PlayConfig.autoplay:false` = 「只加载、不自动起播」，把起播时机交给用户手势（配合封面图）。
+- **配置**：`player.play({ url:'…m3u8', poster:'…jpg', autoplay:false })`，`createPlayer({ posterMode:'overlay' })`。
+- **交互**：调用 `play({ autoplay:false })` → 等 manifest 就绪 → 观察状态 → 再调用无参 `play()`。
+- **预期**：
+  1. manifest 已加载（Network 面板可见 m3u8/分片请求），但 `video.paused === true`、`getState().playing === false`。
+  2. 播放按钮呈「播放」态（意图为负，不得显示为播放中）。
+  3. 封面图持续显示，不被隐藏。
+  4. 之后无参 `play()` 正常开始播放，`playing` 转 `true`（走「恢复播放」分支，不重新拉流）。
+  5. 与 US-04 的区别：US-04 测**构造级** `PlayerConfig.autoplay`，本用例测**起播级** `PlayConfig.autoplay`；**缺省（不传）时视为 `true`**，保持既有行为。
+
+### US-40 封面图叠加层（posterMode: 'overlay'）
+
+- **目标**：MSE 路径下封面图稳定呈现——原生 `<video>.poster` 在 hls.js 接管 `src` 为 `blob:` 后不可靠。
+- **配置**：`createPlayer({ posterMode:'overlay' })`，`play({ poster:'…jpg' })`。
+- **交互**：起播 → 观察封面 → 首帧渲染。
+- **预期**：
+  1. 容器内出现一个绝对定位的 `<img>` 图层（`class="live-sdk-poster"`），`src` 为封面地址，且 `<video>.poster` **不被写入**（避免重复呈现）。
+  2. 首帧呈现（`playing` / `first_frame`）后图层隐藏（`display:none`）。
+  3. 图层 `z-index` 低于默认控件层，**不遮挡**播放/音量/全屏按钮的点击。
+  4. `posterMode` 缺省为 `'native'`：不创建图层，改写 `<video>.poster`（保持既有行为）。
+  5. `destroy()` 后图层被移除。
+
+### US-41 错误码映射大小写不敏感（接口/CDN 异常可观测）
+
+- **目标**：hls.js 的 `details` 是 camelCase（`manifestLoadError`），必须能被正确归类——否则错误码全部落到 `unknown`，「接口与 CDN 异常可观测」失效。
+- **配置**：默认（构造错误即可观测）。
+- **交互**：制造以下异常，观察 `error` 事件的 `code` 与上报记录。
+  1. 主 playlist 404。
+  2. 分片加载失败。
+  3. manifest 解析失败（fatal）。
+- **预期**：
+  1. 主 playlist 404 → `code === 'manifest_404'`；普通 manifest 失败 → `manifest_load_error`；分片失败 → `frag_load_error`。
+  2. **不得出现**「明明有明确异常却报 `unknown`」的情况（回归重点）。
+  3. camelCase 与全大写两种书写都能正确归类（自研内核风格兼容）。
+  4. HTTP 404 来自响应状态码（hls.js 放在 `data.response.code`，不在 `details` 里）。
+  5. 致命错误（manifest/codec/key/mediaError）的 `fatal === true`，可恢复错误 `fatal === false` 并自动重连。
+
+### US-42 播放进度字段（currentTime / duration）
+
+- **目标**：状态快照可读播放位置与时长，用于状态展示/埋点，且不引起订阅方高频重渲染。
+- **配置**：默认。
+- **交互**：起播 → 播放若干秒 → 读取 `getState()`；再对 HLS 点播流重复。
+- **预期**：
+  1. `getState().currentTime` 为当前播放位置（秒），随播放推进。
+  2. **节流**：同一整秒内多次 `timeupdate` 只写一次快照（订阅回调次数 ≈ 每秒 1 次，而非 ~4 次）。
+  3. 直播流 `getState().duration === Infinity`（如实透传规范行为，不伪造成 0）。
+  4. HLS 点播流（`#EXT-X-ENDLIST`）`duration` 为有限值。
+  5. 元数据未就绪时 `duration === 0`，不出现 `NaN`。
+  6. 新一轮起播（切流/重播）后进度归零。
+
+### US-43 插件注册兼容实例（registerPlugin）
+
+- **目标**：`registerPlugin` 同时接受构造器与实例，贴合常见插件 API 习惯。
+- **配置**：自定义 `BasePlugin` 子类。
+- **交互**：
+  1. `player.registerPlugin(MyPlugin)`。
+  2. `player.registerPlugin(new MyPlugin())`（另一个播放器实例上）。
+- **预期**：
+  1. 传构造器：SDK 实例化，返回该实例，`create` / `init` 被调用一次。
+  2. 传实例：SDK **复用**传入的同一对象（`registerPlugin(x) === x`），同样调用 `create` / `init`，业务可继续持有并使用该引用。
+  3. 同名插件重复注册被忽略（返回已有实例，不重复初始化）。
+  4. `preset` 数组仍只接受构造器。
+
+---
+
+## 附录：验收环境建议
 | 项 | 建议 |
 |---|---|
 | 浏览器 | Chrome 最新版（MSE）、iOS Safari 16 与 17.1+（对照 US-02 / US-13） |

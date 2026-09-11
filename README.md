@@ -185,12 +185,13 @@ player.on('features_updated', (report) => {
 | `kernel` | `KernelConstructor` | 自动选路 | 自定义内核 |
 | `hlsConfig` | `object` | — | 透传 hls.js 原生配置 |
 | `preset` | `string \| PluginConstructor[]` | `'live'` | 插件组合 |
-| `autoplay` | `boolean` | `false` | 自动起播 |
+| `autoplay` | `boolean` | `false` | 构造后自动发起一次 `play()`（需同时给 `url`） |
 | `muted` | `boolean` | `false` | 静音 |
 | `ignores` | `string[]` | — | 关闭 Preset 内指定功能插件 |
 | `network` | `Partial<NetworkConfig>` | 内置 | 网络敏感策略参数 |
 | `observability` | `'full' \| 'basic'` | `'full'` | 观测档位 |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | 宿主环境适配 |
+| `posterMode` | `'native' \| 'overlay'` | `'native'` | 封面图呈现方式；MSE 路径建议 `'overlay'` |
 
 ### 命令
 
@@ -354,7 +355,7 @@ createPlayer({ container: '#player', preset: [MyReporter] })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 30 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 45 条用例，格式：目标 / 配置 / 交互 / 预期
 
 ## 开发
 
@@ -567,12 +568,13 @@ player.on('features_updated', (report) => {
 | `kernel` | `KernelConstructor` | auto-routed | Custom kernel |
 | `hlsConfig` | `object` | — | Pass-through to native hls.js config |
 | `preset` | `string \| PluginConstructor[]` | `'live'` | Plugin composition |
-| `autoplay` | `boolean` | `false` | Start playing automatically |
+| `autoplay` | `boolean` | `false` | Fire one `play()` after construction (requires `url`) |
 | `muted` | `boolean` | `false` | Mute |
 | `ignores` | `string[]` | — | Disable specific feature plugins inside the Preset |
 | `network` | `Partial<NetworkConfig>` | built-in | Network-sensitive policy parameters |
 | `observability` | `'full' \| 'basic'` | `'full'` | Observability tier |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | Host-environment adapter |
+| `posterMode` | `'native' \| 'overlay'` | `'native'` | How the poster is rendered; `'overlay'` recommended on the MSE path |
 
 ### Commands
 
@@ -736,7 +738,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 30 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 45 cases in the format: goal / config / interaction / expectation
 
 ## Development
 

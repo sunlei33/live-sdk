@@ -127,14 +127,37 @@ export interface PlayConfig {
   url: string // 主播放地址
   backup?: string // 备用流
   liveStatus?: string // 直播状态查询接口
-  autoplay?: boolean // 自动播放
+  /**
+   * 本次起播是否**自动开始播放**。缺省 `true`（调用 play() 即播放意图）。
+   *
+   * 显式传 `false` = 「只加载、不自动播放」：manifest 就绪后不调用 `<video>.play()`，
+   * `PlayerState.playing` 保持 false、按钮呈「播放」态，等用户手势后再由业务调用
+   * `player.play()`（无参）开始播放。典型场景：先展示封面图。
+   *
+   * 与 `PlayerConfig.autoplay` 的区别：后者管「createPlayer 之后是否自动发起一次 play()」，
+   * 本字段管「这一次 play() 里要不要自动开始播放」。
+   */
+  autoplay?: boolean
   muted?: boolean // 静音
-  poster?: string // 封面图
+  poster?: string // 封面图（呈现方式见 PlayerConfig.posterMode）
   quality?: Quality[] // 清晰度档位元数据（业务下发）
 }
 
 export type PlayConfigProvider = () => PlayConfig | Promise<PlayConfig>
 export type PlayInput = string | PlayConfig | PlayConfigProvider
+
+/**
+ * 封面图（poster）呈现方式：
+ *
+ * - `native`（默认）：写 `<video>.poster`，由浏览器原生呈现。
+ * - `overlay`：在视频之上叠一层绝对定位的 `<img>`，**首帧呈现后隐藏**。
+ *
+ * 为什么需要 `overlay`：MSE 路径下 hls.js 会把 `<video>.src` 接管为 `blob:`，
+ * 原生 `poster` 的呈现时机不可靠（部分浏览器在 `attachMedia` 后即清空封面，
+ * 或在缓冲期不保持显示）。用 DOM 图层叠一层可完全掌控显隐时机，且不受 MSE 影响。
+ * 该图层 z-index 低于默认控件层，不会遮挡操作。
+ */
+export type PosterMode = 'native' | 'overlay'
 
 // ───────────────────────────── 三契约（命令 / 状态 / 事件） ─────────────────────────────
 
@@ -155,6 +178,18 @@ export interface PlayerState {
   qualities: Quality[] // 有效档位列表（PlayConfig.quality 中已映射到 streams 的部分）
   currentQuality: number | null // 当前档位（Quality.id）；未切档/无档时为 null
   capabilities: KernelCapabilities
+  /**
+   * 当前播放位置（秒）。**按「整秒变化」节流更新**（非 `timeupdate` 的 ~4Hz）——
+   * 快照定位是低频字段，避免订阅方（如 React 组件）被高频重渲染。
+   * 需要逐帧精度请直接读 `player.media.currentTime`。
+   */
+  currentTime: number
+  /**
+   * 媒体总时长（秒）。**直播为 `Infinity`**，HLS 点播（`#EXT-X-ENDLIST`）为有限值；
+   * 元数据未就绪时为 `0`。注意 `Infinity` 无法 JSON 序列化（会变 null），
+   * 上报前请自行判 `Number.isFinite`。
+   */
+  duration: number
   [ext: `app.${string}`]: unknown // 扩展点：插件/业务命名空间，内核不预设
 }
 
@@ -188,6 +223,25 @@ export interface FeatureStatusReport {
   features: FeatureStatus[]
   summary: { matched: number; mismatched: number }
 }
+
+// ───────────────────────────── 业务态扩展 ─────────────────────────────
+
+/**
+ * `live_status` 事件的结构化 payload（LivePolling 插件派发，§4.6）。
+ * 仅在状态值**发生变化**时派发（低频、幂等）。
+ *
+ * 接入方可直接消费 `status` 做 UI 分支，也可从 `raw` 取业务自定义字段
+ * （主播信息、预计恢复时间、运营文案等）——SDK 不解析、原样透传。
+ */
+export interface LiveStatusPayload {
+  status: string // 归一后的状态值（取服务端 status / liveStatus / state 之一）
+  previousStatus: string // 上一次状态；首次派发为空串
+  raw: Record<string, unknown> // 服务端原始响应，原样透传
+  time: number // 事件时刻（Date.now()）
+}
+
+/** 业务扩展状态的键：必须落在 `app.` 命名空间内，避免与内核字段冲突 */
+export type AppStateKey = `app.${string}`
 
 // ───────────────────────────── 错误分级 ─────────────────────────────
 
@@ -240,12 +294,13 @@ export interface PlayerConfig {
   kernel?: KernelConstructor // 缺省 sniffer 自动选
   hlsConfig?: Record<string, unknown> // 透传 hls.js 原生配置
   preset?: string | PluginConstructor[] // 插件组合，默认 'live'
-  autoplay?: boolean // 默认 false
+  autoplay?: boolean // 默认 false；true = createPlayer 后自动发起一次 play()（需同时给 url）
   muted?: boolean // 默认 false
   ignores?: string[] // 关闭 Preset 内功能插件
   network?: Partial<NetworkConfig> // 网络敏感策略参数
   observability?: Observability // 默认 'full'
   env?: EnvAdapter // 默认 WebEnvAdapter
+  posterMode?: PosterMode // 封面图呈现方式，默认 'native'（MSE 路径建议 'overlay'）
 }
 
 // ───────────────────────────── 插件 ─────────────────────────────
@@ -267,6 +322,12 @@ export interface PluginConstructor {
 export interface Plugin extends PluginLifecycle {
   readonly name: string
 }
+
+/**
+ * 插件注册入参：**构造器或实例皆可**（`player.registerPlugin(...)`）。
+ * preset 数组仍只接受构造器（SDK 统一实例化）。
+ */
+export type PluginInput = PluginConstructor | Plugin
 
 export interface ReporterPlugin extends Plugin {
   report(record: ReportRecord): void
