@@ -61,7 +61,9 @@ ok "node $(node -v) / npm $(npm -v)"
 [ "$PRIVATE" = "false" ] || die "package.json 里 private=true，无法发布"
 
 # npm 登录态
+LOGGED_IN=0
 if WHOAMI="$(npm whoami 2>/dev/null)"; then
+  LOGGED_IN=1
   ok "npm 已登录：$WHOAMI"
 elif [ "$DRY_RUN" = 1 ]; then
   warn "npm 未登录（演练模式不阻断；正式发布前需 npm adduser / npm login）"
@@ -69,11 +71,28 @@ else
   die "npm 未登录。请先执行  npm adduser  （或 npm login）后再跑本脚本"
 fi
 
-# 作用域归属提示（发布 scoped 包必须先拥有该 scope；可用 npm org ls <scope> 查看）
+# scope 归属检查：scoped 包必须拥有对应 scope，否则 publish 会 403
+# （仅在已登录时检查——未登录时 npm org ls 必然失败，会给出误导性的告警）
 case "$NAME" in
   @*)
-    SCOPE="${NAME%%/*}"
-    info "包名为 scoped（$SCOPE），发布前请确认你有该 scope 的发布权限：npm org ls ${SCOPE#@}"
+    if [ "$LOGGED_IN" = 1 ]; then
+      SCOPE_NAME="${NAME%%/*}"; SCOPE_NAME="${SCOPE_NAME#@}"
+      if npm org ls "$SCOPE_NAME" >/dev/null 2>&1; then
+        ok "scope 检查：你属于 @$SCOPE_NAME"
+      else
+        warn "scope 检查：查不到 @$SCOPE_NAME 的成员关系"
+        info "原因可能是「组织不存在」或「你不是成员」——npm 对两种情况都返回 404，无法区分。"
+        info "解决：① 建组织 https://www.npmjs.com/org/create（组织名即 scope 名）；"
+        info "      ② 或改用你的用户名 scope（自动拥有、免费）：npm pkg set name=\"@\$(npm whoami)/live-sdk\""
+        if [ "$DRY_RUN" != 1 ]; then
+          printf '  仍要继续吗？（继续很可能在 publish 阶段 403）[y/N] '
+          read -r REPLY_SCOPE
+          case "$REPLY_SCOPE" in y|Y|yes|YES) ;; *) echo "  已取消。"; exit 0 ;; esac
+        fi
+      fi
+    else
+      info "scope 检查：跳过（未登录）"
+    fi
     ;;
 esac
 

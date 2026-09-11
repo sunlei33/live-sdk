@@ -4,13 +4,51 @@
 
 ---
 
+## 〇、先确认 scope 归属（最容易卡住的一步）
+
+本包是 **scoped 包**（`@fancaf/...`），发布的前提是你**拥有 `@fancaf` 这个 scope**。scope 有两种来源，**都必须在 npm 网站上获得，CLI 无法创建**（`npm org` 只有 `set` / `rm` / `ls` 三个子命令，没有 `create`）。
+
+```bash
+npm whoami        # 看你的 npm 用户名 —— 它本身就是一个你独有的 scope
+npm org ls fancaf # 查 @fancaf 成员；报 404 说明「组织不存在」或「你不在其中」
+```
+
+> 注意：`npm org ls <scope>` 对**不存在的组织**和**你不是成员的组织**都返回 404，无法据此区分。
+
+### 方式 A：用用户名当 scope（推荐，零成本）
+
+每个 npm 用户都**自动拥有**与用户名同名的 scope，无需申请、无需付费、立即生效。
+
+- 若用户名为 `sunlei33`，则 `@sunlei33/live-sdk` 立即可发。
+- 切换方式（改包名即可，其他配置不用动）：
+
+```bash
+# 把 <username> 换成 npm whoami 的输出
+npm pkg set name='@<username>/live-sdk'
+```
+
+### 方式 B：创建 Organization 以获得 `@fancaf`
+
+1. 登录 https://www.npmjs.com
+2. 右上角头像 → **Add an Organization**，或直接打开 https://www.npmjs.com/org/create
+3. **Name 填 `fancaf`** —— 组织名就是 scope 名
+4. 选择套餐：**"Unlimited public packages" 免费版**（仅公开包；付费版 $7/人/月 才支持私有包）
+5. 点 **Create**，创建者自动成为 Owner
+
+注意事项：
+
+- **组织名全局唯一且不可随意改名**（改名需联系 npm Support），所以务必确认 `fancaf` 没被占用。目前该 scope 下没有任何已发布包，看起来是空闲的。
+- 若被他人占用，创建会失败，此时只能换组织名或改用方式 A。
+- 若你只是要发包给自己的项目，**方式 A 完全够用**，不必建组织。
+
+---
+
 ## 一、一次性准备
 
 ```bash
 cd D:/dev/m-player/live-sdk
 npm adduser          # 登录 npm（浏览器授权）
-npm whoami           # 确认登录身份，并确认对 @fancaf scope 有发布权限
-npm org ls fancaf    # 列出 @fancaf 成员（应能看到你自己；看不到则无发布权）
+npm whoami           # 确认登录身份
 ```
 
 依赖已装好可跳过；换机器则先 `npm ci`。
