@@ -66,18 +66,24 @@ npm run release
 
 # 开了两步验证（2FA）的话，把一次性口令一起传进去
 npm run release -- --otp=123456
+
+# CI / 无交互终端：加 --yes 明确确认（否则脚本会拒绝发布）
+npm run release -- --yes
 ```
 
-脚本 `scripts/publish.sh` 会依次做：
+脚本 `scripts/publish.mjs` 会依次做：
 
-1. **前置检查** —— node/npm、`private` 未开启、`npm whoami` 登录态、scoped 包权限提示、git 工作区与分支
+1. **前置检查** —— node/npm、`private` 未开启、`npm whoami` 登录态、scoped 包的 scope 归属、git 工作区与分支
 2. **质量门** —— `npm test`（49 条）→ `npm run build` → `npm run verify`（类型契约 + 导出符号 + 运行时冒烟）
 3. **预览** —— `npm pack --dry-run`，列出将要上传的每个文件与体积
 4. **确认** —— 输入 `y` 才继续
 5. **发布** —— `npm publish --ignore-scripts`
 6. **（可选）打 tag** —— 询问是否为本次发布创建 `v0.1.0` 并推送到 origin
 
-其他参数：`--skip-gate` 跳过质量门（不推荐）、`--help` 查看用法。
+其他参数：`--skip-gate` 跳过质量门（不推荐）、`--yes` 跳过交互确认、`--help` 查看用法。
+
+> **跨平台**：脚本用 Node 编写（`scripts/publish.mjs`），只依赖 Node 内置模块，**Windows / macOS / Linux 行为完全一致**，不依赖 bash / Git Bash。之所以不是 `.sh`——Windows 下 `.sh` 无法双击或在 cmd / PowerShell 里直接运行。
+
 
 ---
 

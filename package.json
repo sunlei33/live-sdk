@@ -46,8 +46,8 @@
     "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/smoke.mjs",
     "verify:all": "npm run test && npm run build && npm run verify && npm run e2e",
     "pack:check": "npm run build && npm pack --dry-run",
-    "release": "bash scripts/publish.sh",
-    "release:dry": "bash scripts/publish.sh --dry-run",
+    "release": "node scripts/publish.mjs",
+    "release:dry": "node scripts/publish.mjs --dry-run",
     "prepublishOnly": "npm test && npm run build && npm run verify"
   },
   "keywords": [
