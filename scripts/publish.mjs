@@ -221,7 +221,19 @@ closeRl()
 bold('5) 发布')
 let res = runCapture('npm', ['publish', '--ignore-scripts', ...publishArgs])
 
-// 2FA / 权限类失败：给出精确诊断，而不是笼统报「发布失败」
+// 失败时给出精确诊断，而不是笼统报「发布失败」
+if (!res.ok && /stage-only|staged publishing|npm stage publish/i.test(res.out)) {
+  console.log()
+  warn('诊断：当前 token 是「仅暂存（stage only）」权限，无法直接发布。')
+  info('原因：建 Granular Access Token 时，Permissions 选了 "Read and write (stage only)"。')
+  info('解决：重新生成一个 token（权限不可改，必须重建），Permissions 选')
+  info('      "Read and write (publish and stage)"，并勾选 Bypass two-factor authentication。')
+  console.log()
+  info('为什么不用暂存流程：staged publishing 要求「包已存在于 registry」，')
+  info('      对全新包不可用 —— 首次发布必须走直接发布。')
+  die('发布失败：token 权限为 stage-only')
+}
+
 if (!res.ok && /two-factor authentication|EOTP/i.test(res.out)) {
   const tfa = twoFactorStatus()
   console.log()
@@ -231,7 +243,8 @@ if (!res.ok && /two-factor authentication|EOTP/i.test(res.out)) {
     console.log()
     info('A. 建 Granular Access Token 并勾选 Bypass 2FA（推荐：一次配置，长期免交互）')
     info(`   https://www.npmjs.com/settings/${whoami ?? '<用户名>'}/tokens → Generate New Token`)
-    info('   · Packages and scopes → Read and write → 选中你的 scope')
+    info('   · Packages and scopes → Permissions 选 "Read and write (publish and stage)"')
+    info('     （切勿选 "stage only"——那只能暂存，首发用不了）')
     info('   · 勾选 "Bypass two-factor authentication"')
     info('   生成后执行：npm config set //registry.npmjs.org/:_authToken=<token>')
     console.log()

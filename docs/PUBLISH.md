@@ -75,15 +75,20 @@ npm error - Two-factor authentication or granular access token with bypass 2fa e
 npm profile get          # 看 "two-factor auth:" 一行
 ```
 
+另一种常见失败是 token 权限选成了 `stage only`（报错文案不同，见**情况 C**）。
+
+下面按你的账号状态对号入座：
+
 ### 情况 A：`two-factor auth: disabled`（无 2FA）
 
 此时**没有认证器可生成 OTP**，`--otp=` 方案无法使用，**只能走 Granular Access Token**：
 
 1. 打开 https://www.npmjs.com/settings/sunlei33/tokens → **Generate New Token** → 选 **Granular Access Token**
 2. 关键配置：
-   - **Bypass two-factor authentication** → ✅ **必须勾选**（这是本次 403 的解法）
-   - **Packages and scopes** → Permissions 选 **Read and write**，Scope 选中你的 `@<scope>`
-   - Expiration / Allowed IP ranges 按需设置
+   - **Packages and scopes → Permissions** → 必须选 **`Read and write (publish and stage)`**
+     ⚠️ 切勿选 **`Read and write (stage only)`** —— 那只能暂存、不能直接发布（见情况 C）
+   - **Bypass two-factor authentication** → ✅ **必须勾选**（这是 403 的解药）
+   - Scope 选中你的 `@<scope>`；Expiration / Allowed IP ranges 按需
 3. Generate Token 后**立即复制**（只显示一次）
 4. 写入 npm 配置（覆盖掉 `npm login` 留下的那个无 bypass 权限的 token）：
 
@@ -94,11 +99,36 @@ npm config set //registry.npmjs.org/:_authToken=<你的token>
 > 该 token 等同密码，切勿提交到仓库。若想避免落盘，可改用环境变量：
 > 在项目 `.npmrc` 写 `//registry.npmjs.org/:_authToken=${NPM_TOKEN}`，发布前 `export NPM_TOKEN=...`。
 
+#### Permissions 四个选项的区别（npm 官方语义）
+
+| 选项 | 能否直接发布 | 说明 |
+|---|---|---|
+| No access | ❌ | 无包权限 |
+| Read-only | ❌ | 只能读 |
+| **Read and write (publish and stage)** | ✅ | **首发/日常发布选这个** |
+| Read and write (stage only) | ❌ | 只能暂存，需另一位**开了 2FA** 的维护者批准才能上线 |
+
 ### 情况 B：已启用 2FA
 
 每次发布会需要一枚 6 位 OTP。**不要**把 OTP 传给 `--otp` 后干等——TOTP 只有 30 秒有效期，而质量门要跑 40 秒以上，等轮到时早已过期。
 
 正确做法：**直接 `npm run release`**，脚本会在真正执行 `npm publish` 的前一刻提示你输入 OTP。
+
+### 情况 C：报「Stage-only tokens cannot publish new package versions directly」
+
+```
+Stage-only tokens cannot publish new package versions directly. Versions must be staged
+with `npm stage publish` and then promoted by a maintainer with two-factor authentication
+(2FA) enabled. This token can still deprecate versions, move dist-tags, and unpublish.
+```
+
+**原因**：建 GAT 时 Permissions 选了 `Read and write (stage only)`。
+
+**解决**：token 的权限**不可修改**，必须**重新生成**一个，Permissions 改选
+`Read and write (publish and stage)`，然后 `npm config set //registry.npmjs.org/:_authToken=<新token>`。
+
+**不要试图改走暂存流程** —— staged publishing 要求「包**已经存在**于 registry」，
+全新包无法暂存；而且批准环节本身就要求 2FA（你还没开）。所以首次发布必须走直接发布。
 
 ---
 
