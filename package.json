@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "H5 live-streaming player SDK (HLS + fMP4 + hls.js, headless kernel + plugin architecture)",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/live-sdk.es.js",
   "module": "./dist/live-sdk.es.js",
   "unpkg": "./dist/live-sdk.umd.js",
@@ -44,7 +45,10 @@
     "e2e:install": "playwright install chromium webkit",
     "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/smoke.mjs",
     "verify:all": "npm run test && npm run build && npm run verify && npm run e2e",
-    "prepublishOnly": "npm run build && npm run verify"
+    "pack:check": "npm run build && npm pack --dry-run",
+    "release": "bash scripts/publish.sh",
+    "release:dry": "bash scripts/publish.sh --dry-run",
+    "prepublishOnly": "npm test && npm run build && npm run verify"
   },
   "keywords": [
     "live",
@@ -55,11 +59,27 @@
     "hls.js"
   ],
   "license": "MIT",
+  "author": "sunlei33",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunlei33/live-sdk.git"
+  },
+  "homepage": "https://github.com/sunlei33/live-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/sunlei33/live-sdk/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
     "hls.js": "^1.5.17"
+  },
+  "peerDependencies": {
+    "react": ">=17",
+    "vue": ">=3"
   },
   "peerDependenciesMeta": {
     "react": {
