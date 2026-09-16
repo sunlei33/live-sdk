@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "baseUrl": "..",
+    "paths": {
+      "live-sdk": ["src/index.ts"],
+      "live-sdk/ui": ["src/ui/index.ts"],
+      "live-sdk/react": ["src/adapters/react.ts"],
+      "live-sdk/vue": ["src/adapters/vue.ts"]
+    }
+  },
+  "include": ["."]
+}

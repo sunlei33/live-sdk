@@ -20,10 +20,12 @@ export { HlsKernel } from './kernel/HlsKernel'
 export { NativeKernel } from './kernel/NativeKernel'
 
 // —— 适配 / 上报 / 插件 ——
+// 注：**不含 Sentry / 其它第三方上报适配器**。SDK 只提供上报**通道契约**
+// （`BasePlugin` + `report(record)` + 分级/节流/采样），「往哪发」由接入方实现。
+// 理由见 README 能力边界·类型四（第三方系统能力不属播放器核心职责）；
+// 可直接复制的 Sentry 样板见 `examples/reporter-sentry.ts`。
 export { WebEnvAdapter } from './env/WebEnvAdapter'
 export { ConsoleReporter } from './reporter/ConsoleReporter'
-export { SentryReporter } from './reporter/SentryReporter'
-export type { SentryLike } from './reporter/SentryReporter'
 export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 

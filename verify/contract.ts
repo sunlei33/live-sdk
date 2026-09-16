@@ -3,8 +3,7 @@
  * （web-default / react-custom / app-webview），逐字验证 SDK 暴露的 API 面与默认值。
  * 本文件若通过 `tsc --noEmit`，即证明 SDK 满足 skill 所承诺的接入契约。
  */
-import { createPlayer, BasePlugin, Events, ERROR_CODE, ERROR_DOMAIN, COMMAND_NAMES, errorDomainOf, readElementSize, isZeroSized, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
-import type { SentryLike } from 'live-sdk'
+import { createPlayer, BasePlugin, Events, ERROR_CODE, ERROR_DOMAIN, COMMAND_NAMES, errorDomainOf, readElementSize, isZeroSized, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
 import { mountDefaultUI } from 'live-sdk/ui'
 import { usePlayer as usePlayerReact } from 'live-sdk/react'
 import { usePlayer as usePlayerVue } from 'live-sdk/vue'
@@ -199,13 +198,31 @@ function vueComposableTypeCheck(): void {
 }
 void vueComposableTypeCheck
 
-// ══════════ 场景 9：SentryReporter（spec §5.3「官方可选包」） ══════════
-// 契约校验：registerPlugin(SentryReporter, { sentry }) 注入 client，不硬依赖 @sentry/browser
-const sentryLike: SentryLike = {
-  captureException: (_err, _extra) => undefined,
-  addBreadcrumb: (_crumb) => undefined,
+// ══════════ 场景 9：自定义上报插件（spec §5.3） ══════════
+//
+// SDK 只提供上报**通道契约**（`BasePlugin` + `report(record)` + 分级/节流/采样），
+// 「往哪发」由接入方实现。**第三方适配器（Sentry 等）不在核心公开面** ——
+// 属 README 能力边界的「类型四：非播放器核心职责（第三方系统能力）」。
+// 可直接复制的 Sentry 样板见 `examples/reporter-sentry.ts`（由 examples/tsconfig + 单测保护）。
+class CustomReporter extends BasePlugin {
+  static readonly pluginName = 'customReporter'
+  seen: ReportRecord[] = []
+  report(record: ReportRecord): void {
+    // 载荷形状即契约：分级/节流/采样已由 SDK 完成，这里只做「往哪发」
+    const _type: 'error' | 'metric' | 'event' = record.type
+    const _code: string = record.code
+    const _level: 'fatal' | 'warn' | 'info' = record.level
+    const _time: number = record.time
+    // 错误域与诊断快照都在 data 里（与事件通道的 err.domain / err.diagnostic 信息对等）
+    const _domain = record.data.domain
+    const _diag = record.data.diagnostic
+    void [_type, _code, _level, _time, _domain, _diag]
+    this.seen.push(record)
+  }
 }
-player.registerPlugin(SentryReporter, { sentry: sentryLike })
+const customReporter = new CustomReporter()
+player.registerPlugin(customReporter) // 传实例
+player.registerPlugin(CustomReporter) // 传构造器（两种入参都支持）
 
 // ══════════ 场景 10：业务反馈修复项的 API 契约（0.2.0） ══════════
 // 10.1 封面图叠加层（P0-2）

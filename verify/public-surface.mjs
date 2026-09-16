@@ -22,7 +22,6 @@ export const CORE = [
   'LivePolling',
   'NativeKernel',
   'Player',
-  'SentryReporter',
   'UIMount',
   'WebEnvAdapter',
   'bufferLevelOf',

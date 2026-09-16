@@ -13,8 +13,8 @@ export class PluginManager {
 
   /**
    * 注册插件。入参**同时接受构造器与实例**（§3.6）：
-   * - 构造器：`add(SentryReporter, { sentry })` —— 由 SDK 实例化
-   * - 实例：`add(new SentryReporter(), { sentry })` —— 便于业务预先构造/持有引用
+   * - 构造器：`add(MyReporter, { endpoint })` —— 由 SDK 实例化
+   * - 实例：`add(new MyReporter(), { endpoint })` —— 便于业务预先构造/持有引用
    *
    * 两种形态下 SDK 都会调用 `create(player)` 注入播放器、再调用 `init(config)`，
    * 因此业务**不要**在传入实例前自行 `register()`，否则会重复初始化。

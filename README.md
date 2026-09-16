@@ -479,6 +479,49 @@ class MyReporter extends BasePlugin {
 createPlayer({ container: '#player', preset: [MyReporter] })
 ```
 
+### 对接 Sentry（参考实现）
+
+**SDK 不内置 Sentry 适配器。** Sentry 属第三方系统能力，不属播放器核心职责（见[能力边界·类型四](#类型四非播放器核心职责属业务态或平台能力)）；
+SDK 只给上报**通道契约**，「往哪发」由接入方按自己的埋点体系实现。可直接复制的样板见
+[`examples/reporter-sentry.ts`](./examples/reporter-sentry.ts)：
+
+```ts
+import { BasePlugin } from 'live-sdk'
+
+const SENTRY_LEVEL = { fatal: 'fatal', warn: 'warning', info: 'info' } // 坑 ②
+
+export class SentryReporter extends BasePlugin {
+  static readonly pluginName = 'sentryReporter'
+  private sentry
+  init(config) { this.sentry = config?.sentry }
+  report(record) {
+    if (!this.sentry) return                       // 未注入 = 降级为无操作
+    const level = SENTRY_LEVEL[record.level] ?? 'info'
+    if (record.type === 'error') {
+      this.sentry.captureException(new Error(record.code), {
+        level,
+        extra: { code: record.code, ...record.data },   // 坑 ①：不能平铺
+      })
+      return
+    }
+    // 非 error（重连 event / 业务手动 report）→ 面包屑，形成「错误前的上下文轨迹」
+    this.sentry.addBreadcrumb?.({ category: record.type, message: record.code, level, data: record.data })
+  }
+}
+player.registerPlugin(SentryReporter, { sentry: Sentry })
+```
+
+**两个坑**（样板里都标了，务必照抄）：
+
+| # | 坑 | 不照做的后果 |
+|---|---|---|
+| ① | `record.data` 必须包在 **`extra`** 下 | Sentry 合并 CaptureContext 用的是**显式字段白名单**（`tags`/`extra`/`contexts`/`user`/`level`/…），**没有透传机制**，顶层未知键被**静默丢弃** → `message` / `domain` / `diagnostic` 全丢，而**客户端不会报错**，只有亲自去看 Sentry 才会发现 |
+| ② | `level` 要映射：`'warn'` → **`'warning'`** | Sentry 的合法等级是 `'fatal' \| 'error' \| 'warning' \| 'log' \| 'info' \| 'debug'`，**没有 `'warn'`**；直接透传会让等级落在无效值上、告警规则失效 |
+
+> `examples/` 不是摆设：该文件由 `examples/tsconfig.json` 编译、由 `test/reporter-sentry-example.test.ts`
+> 断言行为（`extra` 里有 diagnostic、除 `level`/`extra` 外无多余顶层键、三档 level 映射、breadcrumb 分流），
+> 且这两项检查都在 `npm run verify` 里 —— **示例写错会失败**，避免「文档里的代码悄悄腐烂」。
+
 ## 包结构
 
 | 入口 | 内容 |
@@ -1080,6 +1123,49 @@ class MyReporter extends BasePlugin {
 }
 createPlayer({ container: '#player', preset: [MyReporter] })
 ```
+
+### Wiring up Sentry (reference implementation)
+
+**The SDK does not ship a Sentry adapter.** Sentry is third-party system capability, which is not the player's core responsibility (see [Capability boundaries · type 4](#type-4-non-core-player-responsibilities-business-state-or-platform-capability)); the SDK provides only the reporting **channel contract** — where records go is up to your own telemetry stack. A copy-pasteable blueprint lives in
+[`examples/reporter-sentry.ts`](./examples/reporter-sentry.ts):
+
+```ts
+import { BasePlugin } from 'live-sdk'
+
+const SENTRY_LEVEL = { fatal: 'fatal', warn: 'warning', info: 'info' } // trap ②
+
+export class SentryReporter extends BasePlugin {
+  static readonly pluginName = 'sentryReporter'
+  private sentry
+  init(config) { this.sentry = config?.sentry }
+  report(record) {
+    if (!this.sentry) return                       // not injected = degrade to no-op
+    const level = SENTRY_LEVEL[record.level] ?? 'info'
+    if (record.type === 'error') {
+      this.sentry.captureException(new Error(record.code), {
+        level,
+        extra: { code: record.code, ...record.data },   // trap ①: do NOT flatten
+      })
+      return
+    }
+    // non-error (retry events / manual report) → breadcrumb, building a pre-error trail
+    this.sentry.addBreadcrumb?.({ category: record.type, message: record.code, level, data: record.data })
+  }
+}
+player.registerPlugin(SentryReporter, { sentry: Sentry })
+```
+
+**Two traps** (both marked in the blueprint — please copy them verbatim):
+
+| # | Trap | What happens if you skip it |
+|---|---|---|
+| ① | `record.data` must be nested under **`extra`** | Sentry merges CaptureContext using an **explicit field allowlist** (`tags`/`extra`/`contexts`/`user`/`level`/…), with **no pass-through**, so unknown top-level keys are **silently dropped** → `message` / `domain` / `diagnostic` are all lost, with **no client-side error** — you only find out by looking at Sentry |
+| ② | `level` must be mapped: `'warn'` → **`'warning'`** | Sentry's valid levels are `'fatal' \| 'error' \| 'warning' \| 'log' \| 'info' \| 'debug'` — there is **no `'warn'`**; passing it through lands the level on an invalid value and breaks alert rules |
+
+> `examples/` is not decoration: that file is compiled via `examples/tsconfig.json` and its behaviour is asserted by
+> `test/reporter-sentry-example.test.ts` (`extra` carries the diagnostic, no extra top-level keys beyond `level`/`extra`,
+> all three level mappings, breadcrumb routing) — both wired into `npm run verify`, so **a wrong example fails the build**
+> instead of quietly rotting in the docs.
 
 ## Package Structure
 

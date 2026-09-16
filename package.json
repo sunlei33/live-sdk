@@ -43,7 +43,7 @@
     "test:coverage": "vitest run --coverage",
     "e2e": "playwright test",
     "e2e:install": "playwright install chromium webkit",
-    "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/surface.mjs && node verify/events.mjs && node verify/smoke.mjs",
+    "verify": "tsc -p verify/tsconfig.json --noEmit && tsc -p examples/tsconfig.json --noEmit && node verify/exports.mjs && node verify/surface.mjs && node verify/events.mjs && node verify/smoke.mjs",
     "verify:all": "npm run test && npm run build && npm run verify && npm run e2e",
     "pack:check": "npm run build && npm pack --dry-run",
     "release": "node scripts/publish.mjs",

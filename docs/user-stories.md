@@ -370,22 +370,26 @@
 - **预期**：
   1. `report(record)` 收到 `{ type, code, level, data, time }`。
   2. 多路上报插件同时生效（SDK 广播分发）。
-  3. `ConsoleReporter` / `SentryReporter` 可作为官方参考实现。
+  3. `ConsoleReporter` 是官方默认实现（平台能力、零第三方绑定）；**第三方适配（Sentry / 自建埋点）由接入方实现**，样板见 `examples/reporter-sentry.ts`。
 
-### US-26 SentryReporter 接入
+### US-26 自定义 Sentry 上报（参考实现）
 
 - **目标**：不硬依赖 `@sentry/browser`，注入式接入；且**传出去的数据必须真的到 Sentry**。
-- **配置**：`registerPlugin(SentryReporter, { sentry })`。
+  SDK **不内置** Sentry 适配器（第三方系统能力不属核心职责），本用例验收的是**参考实现样板**
+  `examples/reporter-sentry.ts` —— 它是接入方会直接复制的代码。
+- **配置**：`registerPlugin(SentryReporter, { sentry })`（样板自带该类）。
 - **交互**：触发 error（含 `diagnostic` 快照）与非 error 记录；分别以 `level` 为 `fatal` / `warn` / `info` 各触发一次。
 - **预期**：
   1. error 走 `captureException`。
   2. 非 error 走 `addBreadcrumb`。
-  3. 未注入 sentry 时不抛错（降级为无操作）。
+  3. 未注入 sentry 时不抛错（降级为无操作）；`sentry` 未实现可选的 `addBreadcrumb` 也不影响 error 上报。
   4. **`record.data` 必须包在 `extra` 下**：Sentry 合并 CaptureContext 用的是**显式字段白名单**（`tags`/`extra`/`contexts`/`user`/`level`/`fingerprint`/…），**没有透传机制**，顶层未知键会被**静默丢弃**。平铺 `record.data` 会让 `message` / `domain` / `retryCount` / `diagnostic` 全部丢失。
   5. **到达 Sentry 的 `extra.diagnostic` 含 `url` / `networkQuality` 等字段**（回归重点：早先平铺导致快照根本没进 Sentry，而客户端不报错、测试也不失败）。
   6. **`level` 需映射**：SDK 的 `'warn'` → Sentry 的 `'warning'`（Sentry 合法值为 `'fatal'|'error'|'warning'|'log'|'info'|'debug'`，**没有 `'warn'`**），否则等级落在无效值上、订阅规则失效。
   7. `extra.code` 也带上错误码，便于在 Sentry 里按码检索。
   8. 除 `level` / `extra` 外不应有其它顶层键（有则说明又平铺了）。
+  9. **样板本身不得腐烂**：`examples/` 由 `examples/tsconfig.json` 编译（并入 `npm run verify`），
+     行为由 `test/reporter-sentry-example.test.ts` 断言 —— 示例写错会失败，而不是悄悄过期。
 
 ---
 

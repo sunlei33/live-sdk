@@ -696,8 +696,8 @@ export class Player {
 
   /**
    * 注册插件：**构造器或实例皆可**（§3.6）。
-   * - `registerPlugin(SentryReporter, { sentry })` —— 传构造器
-   * - `registerPlugin(new SentryReporter(), { sentry })` —— 传实例
+   * - `registerPlugin(MyReporter, { endpoint })` —— 传构造器，由 SDK 实例化
+   * - `registerPlugin(new MyReporter(), { endpoint })` —— 传实例，业务可预先持有引用
    *
    * 两种形态都会走 `create(player)` → `init(config)`，业务不要自行预先 register。
    */
@@ -1351,7 +1351,7 @@ export class Player {
       code: out.code,
       level: out.fatal ? 'fatal' : 'warn',
       // `domain` 必须一并带上：上报通道与事件通道**信息应对等**。
-      // 只给事件通道加 domain（err.domain），会让走上报通道的接入方（如接 SentryReporter）
+      // 只给事件通道加 domain（err.domain），会让走上报通道的接入方（自定义 reporter）
       // 又得自己按 code 映射一遍 —— 那正是 0.5.0 加错误域要消掉的事。
       data: { message: out.message, domain: out.domain, retryCount: out.retryCount, diagnostic },
       time: Date.now(),
