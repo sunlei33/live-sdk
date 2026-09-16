@@ -33,6 +33,53 @@ export function mapErrorCode(details: string, httpStatus?: number): string {
 }
 
 /**
+ * 原生 `<video>` 的 `MediaError` → SDK 错误码映射（NativeKernel / 渐进式直连路径）。
+ *
+ * 为什么必须按 `code` 分派：`MediaError.code` 是 HTML 规范里的**定值枚举**（1–4），
+ * 语义是确定的；若像早期实现那样一律映射成 `network_error`，接入方按错误码分流
+ * 「解码异常 / 接口与 CDN 异常」时就会整体错位 —— 编解码不兼容会被标成网络问题，
+ * 排查方向直接跑偏。
+ *
+ * | code | 规范常量 | 语义 | 映射 | fatal |
+ * |---|---|---|---|---|
+ * | 1 | `MEDIA_ERR_ABORTED` | 用户/脚本主动中止（换源、销毁） | **不上报**（返回 null） | — |
+ * | 2 | `MEDIA_ERR_NETWORK` | 下载中断 | `network_error` | false |
+ * | 3 | `MEDIA_ERR_DECODE` | 解码失败（码流损坏 / 编码不兼容） | `media_decode_error` | true |
+ * | 4 | `MEDIA_ERR_SRC_NOT_SUPPORTED` | 源不可用 | 含网络痕迹 → `network_error`；否则 `media_src_not_supported` | 前者 false / 后者 true |
+ * | 其他 | —— | 未定义（老浏览器不实现 `code`） | `network_error`（保持历史行为） | false |
+ *
+ * code=4 需二次判定的原因：原生路径下「地址 404 / 服务不可达」与「容器格式不支持」
+ * 都表现为 `SRC_NOT_SUPPORTED`，仅凭 code 无法区分 —— 前者应走重连，后者应直接放弃。
+ *
+ * @returns 映射结果；`null` 表示**不应上报**（主动中止不是故障）
+ */
+export function mapMediaErrorCode(
+  code: number | undefined,
+  message = '',
+): { code: string; fatal: boolean } | null {
+  switch (code) {
+    // 1 ABORTED：换源 / destroy / 用户操作导致的中止，属正常竞态，上报即噪声
+    case 1:
+      return null
+    case 2:
+      return { code: ERROR_CODE.NETWORK_ERROR, fatal: false }
+    case 3:
+      return { code: ERROR_CODE.MEDIA_DECODE_ERROR, fatal: true }
+    case 4: {
+      const msg = (message ?? '').toLowerCase()
+      // 网络痕迹（404/403/加载失败）→ 按可恢复的网络错误走重连
+      return /404|403|not\s?found|network|load|timeout/.test(msg)
+        ? { code: ERROR_CODE.NETWORK_ERROR, fatal: false }
+        : { code: ERROR_CODE.MEDIA_SRC_NOT_SUPPORTED, fatal: true }
+    }
+    default:
+      // code 缺失或越界：浏览器实现差异（部分 WebView / 极简 DOM 替身不给 code），
+      // 保持既有可恢复语义，避免把偶发错误升级成 fatal 而中断自动重连。
+      return { code: ERROR_CODE.NETWORK_ERROR, fatal: false }
+  }
+}
+
+/**
  * 判定内核错误是否 fatal（SDK 尽力后仍不可用，需接入方介入）。
  *
  * 同样**不区分大小写**——原实现用大写关键词匹配 hls.js 的小写 details，恒为 false，

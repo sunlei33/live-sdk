@@ -2,6 +2,9 @@
  * live-sdk 全部共享类型定义。
  * 与 docs/live-sdk-spec.md 的 API 面逐字对齐，是「内核 / 插件 / 接入方」三方契约的唯一来源。
  */
+// `SessionState` 的声明在 constants.ts（状态机与常量同处一地），此处仅做类型引用。
+// 纯类型导入在编译期被完全擦除，不会与 constants.ts 形成运行时循环依赖。
+import type { SessionState } from './constants'
 
 // ───────────────────────────── 观测档位 ─────────────────────────────
 
@@ -169,6 +172,38 @@ export interface PlayerCommands {
   switchQuality(id: number): void
   switchURL(url: string): Promise<void>
   requestFullscreen(): void
+  /** 退出全屏（与 `requestFullscreen` 配对；iOS 原生视频全屏亦可退出） */
+  exitFullscreen(): void
+  /**
+   * 定位到指定时间（秒），入参自动钳制到 `[0, duration]`。
+   *
+   * **仅对有限时长（HLS 点播 / `#EXT-X-ENDLIST` / 重播回放）生效**：
+   * 直播无限流下为 noop —— 直播时间轴受 live edge 约束，任意定位会持续累积延迟，
+   * 破坏「边缘跟随」语义（见 README「Non-Goals」）。若需在直播中回到实时边缘，
+   * 请改用 `switchURL()` 重拉或等待流结束进入点播态。
+   */
+  seek(time: number): void
+  /**
+   * 设置倍速。**语义边界**：直播（无限流）下变速会持续累积/消耗延迟 ——
+   * 调慢离边缘越来越远、调快在缓冲耗尽时反复走 `stalled`，故直播主场景不建议使用；
+   * 点播/重播回放（有限时长）为正常用法。
+   *
+   * 入参经浏览器钳制后被**读回**写入 `PlayerState.playbackRate`（快照反映真实生效值）。
+   */
+  setPlaybackRate(rate: number): void
+  /**
+   * 运行时更换封面图（传 `undefined`/空串即移除）。
+   * 呈现方式仍由 `PlayerConfig.posterMode` 决定（native 写 `<video>.poster`；
+   * overlay 更新叠加图层）。典型场景：「重播态换封面」「预告转直播换封面」。
+   */
+  setPoster(poster?: string): void
+  /**
+   * 运行时覆盖 LL-HLS 目标延迟（秒），缺省参数回落到 `PlayerConfig.network` 的
+   * `targetLatency` / `maxLatency`（含按网络质量动态求值的策略）。
+   * 传空（不传参）表示**清除本次覆盖**、恢复配置驱动的动态值。
+   * 内核不支持 `setLiveLatency` 时静默忽略（见 `KernelCapabilities.lowLatency`）。
+   */
+  setLiveLatency(target?: number, max?: number): void
 }
 
 export interface PlayerState {
@@ -178,6 +213,29 @@ export interface PlayerState {
   qualities: Quality[] // 有效档位列表（PlayConfig.quality 中已映射到 streams 的部分）
   currentQuality: number | null // 当前档位（Quality.id）；未切档/无档时为 null
   capabilities: KernelCapabilities
+  /**
+   * 会话真相：播放器内部此刻处于哪个阶段
+   * （`idle` / `loading` / `ready` / `playing` / `paused` / `stalled` / `error` / `ended`）。
+   *
+   * ⚠️ **必须与 `playing` 分清，二者在卡顿时会分叉**：
+   * - `playing` 回答「用户看到的是播放还是暂停」——**呈现语义**；
+   * - `sessionState` 回答「播放器内部此刻处于什么阶段」——**事实语义**。
+   *
+   * 卡顿（`stalled`）期间 `playing` 仍为 `true`（已起播、只是缓冲，按钮该显示「播放中」），
+   * 而 `sessionState` 为 `'stalled'`。因此：
+   * - 播放/暂停**按钮形态** → 判 `playing`；
+   * - 转圈提示、降级提示、埋点分类、「是正常播放还是卡住了」→ 判 `sessionState`。
+   */
+  sessionState: SessionState
+  /**
+   * 当前播放的是否为 `PlayConfig.backup` 备用流。
+   *
+   * 复位点（三处，缺一都会让标记与事实不符）：
+   * - `play()` 新一轮起播 → `false`（起播恒用主地址）；
+   * - `switchURL()` 显式换源 → `false`（业务主动指定的地址，不该继续显示「备用流中」）；
+   * - 断流重连切到 `backup`（`reload()` 第 1 次）→ `true`。
+   */
+  usingBackup: boolean
   /**
    * 当前播放位置（秒）。**按「整秒变化」节流更新**（非 `timeupdate` 的 ~4Hz）——
    * 快照定位是低频字段，避免订阅方（如 React 组件）被高频重渲染。
@@ -190,7 +248,57 @@ export interface PlayerState {
    * 上报前请自行判 `Number.isFinite`。
    */
   duration: number
+  /**
+   * 是否处于全屏。兼容标准 Fullscreen API 与 iOS 原生视频全屏
+   * （后者不体现在 `document.fullscreenElement`）。
+   * 用途：切换「进入/退出全屏」按钮形态，或在全屏变化时调整自绘控件布局。
+   */
+  fullscreen: boolean
+  /** 当前倍速（真实生效值，经浏览器钳制后读回）。默认 `1`。 */
+  playbackRate: number
   [ext: `app.${string}`]: unknown // 扩展点：插件/业务命名空间，内核不预设
+}
+
+/**
+ * 会话级累计指标（对应 `getSessionReport()`）。
+ *
+ * **为什么不并入 `getStats()`**：`StatsInfo` 的字段语义是「当前这一瞬间的播放质量」
+ * （码率 / fps / 丢帧），而本接口的字段是「本轮会话自起播以来的累计量」。
+ * 两类混在一起后，「尚未起播」与「值就是 0」在类型上无法区分，接入方只能靠猜；
+ * 且未来给 `StatsInfo` 加字段时的兼容性判断也会变复杂。
+ * 因此保持 `getStats()` 的瞬时语义不动，累计量单列一处 —— 三层各归其位：
+ * 瞬时（`getStats`）/ 累计（`getSessionReport`）/ 低频语义（`PlayerState`）。
+ *
+ * **会话边界**：由 `play(PlayConfig)` 的**新一轮起播**重置（首帧耗时、卡顿次数与时长、
+ * 实际播放时长全部清零，`loadStartTime` 取新的起播时刻）。
+ * `switchURL()` **不重置** —— 那是同一次观看行为换源，不该把统计切成两段。
+ * `play()`（无参，恢复播放）**不重置** —— 那是暂停后的续播，不是新一轮会话。
+ */
+export interface SessionReport {
+  /**
+   * 首帧耗时（ms）：从本轮起播请求（`play()`）到首个可呈现帧就绪（`loadeddata` / `canplay`）。
+   * 尚未出首帧（或从未起播）为 `null`。
+   *
+   * 注意 `autoplay: false` 的场景：此时首帧信号可能要等到用户手势后才到，
+   * 本值会把「等用户点播放」的时间一并计入。若你要的是「纯加载耗时」，
+   * 请在 `autoplay: true` 下取用，或改用 `LOAD_START` → `FIRST_FRAME` 两个事件自行计算。
+   */
+  firstFrameCost: number | null
+  /** 本轮会话累计卡顿次数（进入 `sessionState === 'stalled'` 的次数）。 */
+  stallCount: number
+  /** 本轮会话累计卡顿时长（ms）。进行中的卡顿按「此刻 − 进入时刻」实时计入。 */
+  stallDuration: number
+  /**
+   * 本轮会话累计**实际播放**时长（ms）。
+   *
+   * 语义写死为「只累计 `sessionState === 'playing'` 的时长」——
+   * 加载、暂停、卡顿、缓冲、后台冻结期间都**不计入**。观看时长上报要的就是这个口径。
+   * 若你需要的是「会话挂钟时长」（含暂停与卡顿的总时长），
+   * 请用 `Date.now() - loadStartTime` 自行计算，不要复用 `watchTime` 承载两种解读。
+   */
+  watchTime: number
+  /** 本轮会话起播时刻（`Date.now()`）；从未起播为 `null`。 */
+  loadStartTime: number | null
 }
 
 // ───────────────────────────── 网络敏感策略参数 ─────────────────────────────
@@ -237,6 +345,30 @@ export interface LiveStatusPayload {
   status: string // 归一后的状态值（取服务端 status / liveStatus / state 之一）
   previousStatus: string // 上一次状态；首次派发为空串
   raw: Record<string, unknown> // 服务端原始响应，原样透传
+  time: number // 事件时刻（Date.now()）
+}
+
+/**
+ * `live_status_error` 事件的结构化 payload（LivePolling 插件派发）。
+ *
+ * **为什么是独立事件，而不并入 `Events.ERROR`**：轮询失败是**旁路能力的故障**，
+ * 不是播放错误。若并入后者，接入方按 `err.fatal` 分流的兜底逻辑、错误率统计、
+ * Sentry 捕获都会把「状态接口 500」记成「直播播放失败」——
+ * 故障归因被打歪，且一条接口抖动会污染整条播放错误链路。
+ *
+ * **事件名为什么不在 `Events` 枚举里**：与 `live_status` 同理 —— 轮询是
+ * `preset: 'live'` 的可选旁路能力，不是播放内核契约的一部分。
+ * 不接 `PlayConfig.liveStatus` 的接入方永远收不到它，也不该被迫关心。
+ *
+ * **派发节流**：`failCount` 在连续失败期间自增、一旦成功立即归零。
+ * 为同时满足「首次失败要立刻知道」与「长时间断网不许刷屏」，只在
+ * `failCount` 为 1、3、10 以及其后每满 30 次（30、60、90…）时派发事件；
+ * `live_status_error` 之外每一次失败仍会走 `logger.warn`，日志不节流。
+ */
+export interface LiveStatusErrorPayload {
+  url: string // 轮询接口地址
+  failCount: number // 连续失败次数（成功即归零）
+  error: string // 失败原因（HTTP 状态 / 异常消息 / 响应缺少状态字段）
   time: number // 事件时刻（Date.now()）
 }
 

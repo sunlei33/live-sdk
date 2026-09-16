@@ -37,6 +37,14 @@ export const ERROR_CODE = {
   LOAD_TIMEOUT: 'load_timeout',
   RETRY_EXHAUSTED: 'retry_exhausted',
   DRM_NO_LICENSE: 'drm_no_license',
+  /**
+   * 解码失败（`MediaError.code === 3`）。重试无意义 —— 编码/码流问题不会因重连而消失，
+   * 故一律 fatal。与 `network_error` 分开是为了让接入方的「解码异常 / 接口与 CDN 异常」
+   * 分流不至于错位（见 utils/errors.ts#mapMediaErrorCode）。
+   */
+  MEDIA_DECODE_ERROR: 'media_decode_error',
+  /** 源容器/格式不被当前内核支持（`MediaError.code === 4` 且无网络痕迹），fatal。 */
+  MEDIA_SRC_NOT_SUPPORTED: 'media_src_not_supported',
   UNKNOWN: 'unknown',
 } as const
 

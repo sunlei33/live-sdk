@@ -144,8 +144,9 @@ const state = usePlayer(player) // Ref<PlayerState | null>，就绪前为 null
 | 契约 | API | 说明 |
 |---|---|---|
 | 状态 | `getState()` / `subscribe(cb)` | 低频字段快照；仅在变更时回调 |
-| 命令 | `play` `pause` `mute` `setVolume` `switchQuality` `switchURL` `requestFullscreen` | 意图式操作 |
-| 事件 | `on(name, cb)` / `once` | `first_frame` `manifest_parsed` `features_updated` `error` `live_status` 等 |
+| 命令 | `play` `pause` `mute` `setVolume` `switchQuality` `switchURL` `requestFullscreen` `exitFullscreen` `seek` `setPlaybackRate` `setPoster` `setLiveLatency` | 意图式操作 |
+| 事件 | `on(name, cb)` / `once` | `first_frame` `manifest_parsed` `features_updated` `error` `live_status` `live_status_error` 等 |
+| 查询 | `getStats()` / `bufferInfo()` / `speedInfo()` / `getSessionReport()` | 瞬时指标 vs 会话累计（见下） |
 
 ### 状态（PlayerState）
 
@@ -154,12 +155,26 @@ interface PlayerState {
   playing: boolean
   volume: number
   muted: boolean
-  qualities: Quality[]          // 已映射到 streams 的有效档位
+  qualities: Quality[]          // 已映射到 streams 的有效档位（含业务原始 label）
   currentQuality: number | null // 当前档位（Quality.id）
+  sessionState: SessionState    // 会话真相：idle/loading/ready/playing/paused/stalled/error/ended
+  usingBackup: boolean          // 当前是否在播 PlayConfig.backup 备用流
+  currentTime: number           // 播放位置；按「整秒变化」节流更新
+  duration: number              // 总时长；直播为 Infinity
+  fullscreen: boolean           // 兼容标准 Fullscreen API 与 iOS 原生视频全屏
+  playbackRate: number          // 当前倍速（经浏览器钳制后读回的真实值）
   capabilities: KernelCapabilities
   [ext: `app.${string}`]: unknown
 }
 ```
+
+> **`playing` 与 `sessionState` 的分工**（卡顿时二者刻意分叉，判错会误报）：
+> `playing` 回答「用户看到的是播放还是暂停」—— 转圈、降级提示、埋点分类应判 `sessionState`；
+> 播放/暂停**按钮形态**应判 `playing`。
+> 卡顿（`stalled`）期间 `playing` 仍为 `true`（已起播、只是缓冲），而 `sessionState` 为 `'stalled'`。
+>
+> `usingBackup` 的复位点有三处：`play()` 新一轮起播、`switchURL()` 显式换源 → `false`；
+> 断流重连切到 `backup`（第 1 次重试）→ `true`。
 
 > 状态快照只放**对直播主场景有意义的低频字段**。播放进度、缓冲区间等高频/可观测数据走 `getStats()` / `bufferInfo()` 或 `player.media` 原生引用，不进快照。
 
@@ -200,9 +215,13 @@ player.on('features_updated', (report) => {
 | `play(input?)` | `Promise<void>` | 起播 / 恢复：**无参且已起播过 = 恢复播放**（不重拉流）；带参（URL / `PlayConfig` / provider）= 起播或重新起播 |
 | `pause()` | `void` | 暂停 |
 | `mute(m)` / `setVolume(v)` | `void` | 静音 / 音量 |
-| `switchQuality(id)` | `void` | 切清晰度（`Quality.id`） |
+| `switchQuality(id)` | `void` | 切清晰度（`Quality.id`；`-1` 恢复自动 ABR） |
 | `switchURL(url)` | `Promise<void>` | 运行中切流（保留会话状态） |
-| `requestFullscreen()` | `void` | 全屏 |
+| `requestFullscreen()` / `exitFullscreen()` | `void` | 进入 / 退出全屏（iOS 原生视频全屏亦可退出） |
+| `seek(time)` | `void` | 定位（秒），自动钳制到 `[0, duration]`。**直播无限流下为 noop**；点播/重播正常生效 |
+| `setPlaybackRate(rate)` | `void` | 设置倍速，写后读回。**直播主场景不建议**（变速会持续累积/消耗延迟）；点播/重播为正常用法 |
+| `setPoster(poster?)` | `void` | 运行时更换封面（空值 = 移除）；呈现方式仍由 `posterMode` 决定 |
+| `setLiveLatency(target?, max?)` | `void` | 运行时覆盖 LL-HLS 目标延迟；**传空 = 清除覆盖**、恢复 `network` 配置的动态策略 |
 
 `play()` 与 `switchURL()` 语义一致：resolve = 已起播，reject = SDK 尽力后失败（fatal）。可恢复错误走内部自动重连，不会 reject。
 
@@ -214,9 +233,27 @@ player.on('features_updated', (report) => {
 
 | 方法 | 说明 |
 |---|---|
-| `getStats()` / `bufferInfo()` / `speedInfo()` | 实时指标 / 缓冲区间 / 下载速率 |
+| `getStats()` / `bufferInfo()` / `speedInfo()` | **瞬时**指标 / 缓冲区间 / 下载速率 |
+| `getSessionReport()` | **会话累计**指标：首帧耗时 / 卡顿次数与时长 / 实际播放时长 / 起播时刻 |
 | `getFeatureStatus()` | 端到端能力对齐报告（见上） |
 | `getLastRetryDiagnostic()` | 最近一次重试诊断快照；无重试时为 `null` |
+
+**为什么累计指标不并入 `getStats()`**：`StatsInfo` 的字段语义是「此刻这一瞬间的播放质量」（码率 / fps / 丢帧），累计量混进去后，「尚未起播」与「值就是 0」在类型上无法区分。因此分三层各归其位：瞬时（`getStats`）/ 累计（`getSessionReport`）/ 低频语义（`PlayerState`）。
+
+```js
+player.getSessionReport()
+// {
+//   firstFrameCost: 812,   // 首帧耗时 ms；尚未出首帧为 null
+//   stallCount: 2,         // 本轮会话卡顿次数
+//   stallDuration: 3400,   // 累计卡顿时长 ms（进行中的卡顿实时计入）
+//   watchTime: 61200,      // 累计「实际播放」时长 ms —— 加载/暂停/卡顿都不计入
+//   loadStartTime: 1732000000000, // 本轮起播时刻；从未起播为 null
+// }
+```
+
+> **会话边界**：由 `play(PlayConfig)` 的**新一轮起播**重置（全部清零）。
+> `switchURL()` **不重置**（同一次观看行为换源）；`play()`（无参、恢复播放）也**不重置**（那是续播，不是新会话）。
+> 若需要「会话挂钟时长」（含暂停与卡顿），请用 `Date.now() - loadStartTime` 自行计算，不要复用 `watchTime` 承载两种解读。
 
 ### 重试诊断（排查用）
 
@@ -240,17 +277,71 @@ player.on('error', (e) => {
 
 ### 事件
 
+`Events` 枚举成员（值即对应 snake_case 字符串，`player.on(Events.FIRST_FRAME, cb)` 与 `player.on('first_frame', cb)` 等价）：
+
 ```ts
-Events.FIRST_FRAME        // 'first_frame'
-Events.MANIFEST_PARSED    // 'manifest_parsed'
-Events.FEATURES_UPDATED   // 'features_updated'
-Events.LIVE_STATUS        // 'live_status'
-Events.ERROR              // 'error'
-Events.STATE_CHANGE       // 'state_change'
-Events.KERNEL_EVENT       // 'kernel_event'
+LOAD_START  MANIFEST_PARSED  FIRST_FRAME  PLAY  PAUSE  PLAYING  STALLED  RECOVERED
+RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
+VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
 ```
 
-枚举值即对应 snake_case 字符串，`player.on(Events.FIRST_FRAME, cb)` 与 `player.on('first_frame', cb)` 等价。
+插件还会派发两个**独立事件名**（刻意不进 `Events` 枚举 —— 它们属于 `preset: 'live'` 的可选旁路能力，不是播放内核契约的一部分；不接对应配置的接入方永远收不到）：
+
+```ts
+'live_status'              // LivePolling：直播状态发生变化
+LIVE_STATUS_ERROR_EVENT    // 'live_status_error'：LivePolling 轮询失败
+```
+
+> ⚠️ `BUFFER_UPDATE` 目前是「**已声明、无触发**」的事件（全量检索无 `emit`），不要依赖它 ——
+> 需要缓冲水位请用 `bufferInfo()` 主动查询。它属于「契约已留位、触发时机尚未确定」的保留事件：
+> 缓冲水位只随 `timeupdate`/`progress` 变化（~4Hz），与整秒节流的进度同步语义冲突，
+> 尚无「既准确又不吵」的触发点。若长期不实现，应将其从 `Events` 移除 ——
+> 「订阅了一个永不触发的事件」这种静默不生效，比报错更难排查。
+
+### 直播状态轮询与失败处理（LivePolling）
+
+`preset: 'live'` 内置 `LivePolling`：给了 `PlayConfig.liveStatus` 就按固定间隔轮询，状态**发生变化**时派发结构化 `live_status`（只在变化时派发，避免订阅方反复重渲染）。
+
+**失败语义**：轮询是旁路能力，任何失败都不得影响播放、不得触发重连；但「不打扰」不等于「悄悄死掉」——
+早期实现是空 `catch {}`，接入方无法区分下面两种截然不同的处境：
+
+| 处境 | 业务侧观感 |
+|---|---|
+| 轮询正常，服务端状态确实没变（预期行为） | 「状态一直没变」 |
+| 轮询已持续失败、实际上已经死了（故障） | 「状态一直没变」 |
+
+二者观感完全相同，后者会让人相信一个错误的事实。因此现在：
+
+```js
+import { LIVE_STATUS_ERROR_EVENT } from '@fancaf/live-sdk'
+
+player.on('live_status', (s) => { /* { status, previousStatus, raw, time } */ })
+player.on(LIVE_STATUS_ERROR_EVENT, (e) => {
+  // { url, failCount, error, time }
+  // failCount：连续失败次数（成功即归零）—— 可据此判断是「偶发抖动」还是「持续故障」
+})
+```
+
+- **每次失败都有日志**（`logger.warn`，不节流 —— 日志本就是给人排查用的）；
+- **失败还经 `live_status_error` 事件外抛**，并按 `failCount` 节流：第 **1** 次立刻上报（故障要马上可见），
+  之后取 **3、10** 及每满 **30** 次（30/60/90…），兼顾「持续故障仍有心跳信号」与「长时间断网不刷屏」；
+  判据是静态纯函数 `LivePolling.shouldReportFailure(n)`，可单测锚定；
+- **独立事件而非并入 `Events.ERROR`**：状态接口 500 不该被记成「直播播放失败」，否则接入方的
+  `err.fatal` 兜底分支、错误率统计、Sentry 捕获会被污染；
+- **失败按指数退避**：间隔 = `min(interval × 2^failCount, maxInterval)`（`maxInterval` 默认 5 分钟，
+  可在 `start()` 前改写），成功一次立即复位为基础间隔 —— 既不放弃，也不按原间隔无脑撞墙；
+- **`res.ok` 校验**：`fetch` 对 4xx/5xx 不 reject，不校验 `res.ok` 时「500 + JSON 错误体」既不进
+  `catch`、也取不到状态字段，会变成连痕迹都没有的静默失败；
+- **状态值显式归一**：`{"status": 0}`（数字）会被 `String()` 归一，否则与字符串 `lastStatus` 恒不相等，
+  去重整体失效、每轮都误判为「状态变化」；
+- **`stop()` 会清掉待执行句柄并使在途轮次作废**：后台暂停 / 重新 `start()` 后不会留下引用旧地址的野定时器。
+
+| 成员 | 说明 |
+|---|---|
+| `start(url, interval?)` / `stop()` | 起停轮询（`Player#pollLiveStatus(interval?)` 亦可达） |
+| `shouldReportFailure(failCount)` | 静态节流判据 |
+| `maxInterval` | 退避间隔上限（ms），默认 `300000` |
+
 
 ## 扩展点
 
@@ -301,13 +392,13 @@ createPlayer({ container: '#player', preset: [MyReporter] })
 
 ### 类型一：不做 VOD（时间轴可控的点播场景）
 
-> 根源：live-sdk 是**直播内核**——直播的时间轴受 live edge 约束、不可随意摆布。所有「面向时间轴的相对操作」因此都不属于直播契约。这也解释了为什么 `seek` / `playbackRate` 不在命令集里。
+> 根源：live-sdk 是**直播内核**——直播的时间轴受 live edge 约束、不可随意摆布，因此「面向时间轴的相对操作」在**直播态**下不具备语义。`seek` / `setPlaybackRate` 已进入命令集（服务点播 / 重播回放），但在直播无限流下分别表现为 **noop** 与**不建议使用** —— 命令的存在不代表语义边界消失。
 
-| 不支持 | 说明 | 如需支持 |
+| 边界项 | 说明 | 现状 |
 |---|---|---|
-| **渐进式点播文件**（普通 `.mp4` 直连播放） | 选型 hls.js 单引擎，不做 range 请求/分片加载；「完整 MP4 文件」与选定 fMP4 流式容器是两回事 | 挂 VOD 内核 / `DashKernel`，或改用 mpegts.js |
-| **倍速播放（`playbackRate`）** | 直播是无限线性流，变速只会破坏「边缘跟随 / 低延迟」语义——调慢持续累积延迟，调快在缓冲耗尽时反复等待 | 另挂 VOD 内核；确为 HLS 点播回放时，经 `player.media.playbackRate` 原生属性自行为之 |
-| **定位 / 跳转（`seek`）** | 直播无「跳到某处」语义 | 同上，经 `player.media.currentTime` 原生属性 |
+| **渐进式点播文件**（普通 `.mp4` 直连播放） | 选型 hls.js 单引擎，不做 range 请求/分片加载；「完整 MP4 文件」与选定 fMP4 流式容器是两回事 | 仍不支持：挂 VOD 内核 / `DashKernel`，或改用 mpegts.js |
+| **倍速播放（`setPlaybackRate`）** | 直播是无限线性流，变速只会破坏「边缘跟随 / 低延迟」语义——调慢持续累积延迟，调快在缓冲耗尽时反复等待 | 命令已提供；**直播主场景不建议使用**，点播 / 重播回放为正常用法 |
+| **定位 / 跳转（`seek`）** | 直播无「跳到某处」语义 | 命令已提供，但**直播无限流（`duration === Infinity`）下为 noop**；点播 / 重播（有限时长）正常生效 |
 
 > **注意**：HLS 点播流（`#EXT-X-ENDLIST`）**是支持的**（走同一内核）；「不做 VOD」特指上表这些**面向时间轴的操作**与**渐进式 `.mp4` 文件**。详见技术规格 §1.3。
 
@@ -356,6 +447,7 @@ createPlayer({ container: '#player', preset: [MyReporter] })
 ## 文档
 
 - [用户故事（验收用例）](./docs/user-stories.md) —— 45 条用例，格式：目标 / 配置 / 交互 / 预期
+- [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
 
@@ -409,6 +501,7 @@ Built on **HLS (fMP4/CMAF container) + hls.js**: LL-HLS low latency, ABR and man
 - **End-to-end capability alignment**: `getFeatureStatus()` reports client-vs-server gaps for `lowLatency` / `abr` / `qualitySwitch` / `drm` / `airplay`.
 - **Network adaptation**: target latency, retry count, backoff base, and timeouts are all "static values or dynamically evaluated from network quality".
 - **Tiered observability**: `full` (deep collection) / `basic` (standard `<video>` events only), statically configured.
+- **Session metrics built in**: `PlayerState.sessionState` (session truth) + `getSessionReport()` (first-frame cost / stall count & duration / watch time), so integrations need not hand-roll the same instrumentation.
 - **Plugin extensibility**: `BasePlugin` lifecycle, `UIPlugin` for the view layer, `ReporterPlugin` for reporting, `EnvAdapter` for host adaptation.
 - **Framework adapters**: React / Vue `usePlayer` that consume the three contracts with zero intrusion.
 - **Build-free usage**: UMD bundles are provided, so a CDN `<script>` tag is all you need.
@@ -527,8 +620,9 @@ const state = usePlayer(player) // Ref<PlayerState | null>, null until ready
 | Contract | API | Description |
 |---|---|---|
 | State | `getState()` / `subscribe(cb)` | Low-frequency field snapshot; callbacks fire only on change |
-| Commands | `play` `pause` `mute` `setVolume` `switchQuality` `switchURL` `requestFullscreen` | Intent-based operations |
-| Events | `on(name, cb)` / `once` | `first_frame` `manifest_parsed` `features_updated` `error` `live_status`, etc. |
+| Commands | `play` `pause` `mute` `setVolume` `switchQuality` `switchURL` `requestFullscreen` `exitFullscreen` `seek` `setPlaybackRate` `setPoster` `setLiveLatency` | Intent-based operations |
+| Events | `on(name, cb)` / `once` | `first_frame` `manifest_parsed` `features_updated` `error` `live_status` `live_status_error`, etc. |
+| Query | `getStats()` / `bufferInfo()` / `speedInfo()` / `getSessionReport()` | Instantaneous metrics vs. session accumulators (see below) |
 
 ### State (PlayerState)
 
@@ -537,12 +631,27 @@ interface PlayerState {
   playing: boolean
   volume: number
   muted: boolean
-  qualities: Quality[]          // effective tiers already mapped to streams
+  qualities: Quality[]          // effective tiers already mapped to streams (incl. the original business label)
   currentQuality: number | null // current tier (Quality.id)
+  sessionState: SessionState    // session truth: idle/loading/ready/playing/paused/stalled/error/ended
+  usingBackup: boolean          // whether PlayConfig.backup is currently in use
+  currentTime: number           // playback position; throttled to whole-second changes
+  duration: number              // total duration; Infinity for live
+  fullscreen: boolean           // covers both the standard Fullscreen API and iOS native video fullscreen
+  playbackRate: number          // effective rate, read back after browser clamping
   capabilities: KernelCapabilities
   [ext: `app.${string}`]: unknown
 }
 ```
+
+> **How `playing` and `sessionState` divide the work** (they deliberately diverge while stalling —
+> judging the wrong one gives wrong reports):
+> `playing` answers "does the user see play or pause"; the play/pause **button shape** should read `playing`.
+> Spinners, degradation hints and analytics classification should read `sessionState`.
+> While stalling, `playing` stays `true` (playback has started, it is only buffering) whereas `sessionState` is `'stalled'`.
+>
+> `usingBackup` is reset in three places: a fresh `play()` and an explicit `switchURL()` → `false`;
+> switching to `backup` during a stall-reconnect (first retry) → `true`.
 
 > The snapshot only holds **low-frequency fields meaningful to the primary live-streaming scenario**. High-frequency or observable data such as playback progress and buffered ranges goes through `getStats()` / `bufferInfo()` or the raw `player.media` reference — never into the snapshot.
 
@@ -583,9 +692,13 @@ player.on('features_updated', (report) => {
 | `play(input?)` | `Promise<void>` | Start / resume: **no argument and already started = resume playback** (no re-fetch); with argument (URL / `PlayConfig` / provider) = start or restart |
 | `pause()` | `void` | Pause |
 | `mute(m)` / `setVolume(v)` | `void` | Mute / volume |
-| `switchQuality(id)` | `void` | Switch quality (`Quality.id`) |
+| `switchQuality(id)` | `void` | Switch quality (`Quality.id`; `-1` restores auto ABR) |
 | `switchURL(url)` | `Promise<void>` | Switch stream at runtime (session state preserved) |
-| `requestFullscreen()` | `void` | Fullscreen |
+| `requestFullscreen()` / `exitFullscreen()` | `void` | Enter / exit fullscreen (iOS native video fullscreen can also be exited) |
+| `seek(time)` | `void` | Seek (seconds), auto-clamped to `[0, duration]`. **No-op on an infinite live stream**; works for VOD / replay |
+| `setPlaybackRate(rate)` | `void` | Set playback rate, read back afterwards. **Not recommended for the primary live scenario** (rate changes accumulate/consume latency); fine for VOD / replay |
+| `setPoster(poster?)` | `void` | Swap the poster at runtime (empty = remove); rendering still follows `posterMode` |
+| `setLiveLatency(target?, max?)` | `void` | Override the LL-HLS target latency at runtime; **passing nothing clears the override** and restores the dynamic policy from `network` |
 
 `play()` and `switchURL()` share the same semantics: resolve = playing, reject = failure after the SDK has done its best (fatal). Recoverable errors go through internal automatic reconnection and will not reject.
 
@@ -597,9 +710,27 @@ player.on('features_updated', (report) => {
 
 | Method | Description |
 |---|---|
-| `getStats()` / `bufferInfo()` / `speedInfo()` | Real-time metrics / buffered ranges / download speed |
+| `getStats()` / `bufferInfo()` / `speedInfo()` | **Instantaneous** metrics / buffered ranges / download speed |
+| `getSessionReport()` | **Session accumulators**: first-frame cost / stall count & duration / watch time / load start |
 | `getFeatureStatus()` | End-to-end capability alignment report (see above) |
 | `getLastRetryDiagnostic()` | Most recent retry diagnostic snapshot; `null` when there has been no retry |
+
+**Why the accumulators are not merged into `getStats()`**: `StatsInfo` fields mean "the playback quality at this very instant" (bitrate / fps / dropped frames). Mixing accumulators in makes "not started yet" and "the value really is 0" indistinguishable at the type level. Hence three separate homes: instantaneous (`getStats`) / cumulative (`getSessionReport`) / low-frequency semantic (`PlayerState`).
+
+```js
+player.getSessionReport()
+// {
+//   firstFrameCost: 812,   // ms; null until the first frame is available
+//   stallCount: 2,         // stall episodes this session
+//   stallDuration: 3400,   // accumulated stall ms (an in-progress stall counts live)
+//   watchTime: 61200,      // accumulated *actually playing* ms — loading/paused/stalled excluded
+//   loadStartTime: 1732000000000, // session load start; null if never started
+// }
+```
+
+> **Session boundary**: reset by a fresh `play(PlayConfig)` (everything zeroed).
+> `switchURL()` does **not** reset (same viewing session, different source); `play()` with no argument (resume) does **not** reset either (that is a resume, not a new session).
+> If you need "session wall-clock duration" (including pauses and stalls), compute `Date.now() - loadStartTime` yourself rather than reusing `watchTime` for two meanings.
 
 ### Retry diagnostics (for troubleshooting)
 
@@ -623,17 +754,72 @@ The same snapshot is also delivered with the `retry` event payload (`e.diagnosti
 
 ### Events
 
+`Events` enum members (values are the corresponding snake_case strings, so `player.on(Events.FIRST_FRAME, cb)` is equivalent to `player.on('first_frame', cb)`):
+
 ```ts
-Events.FIRST_FRAME        // 'first_frame'
-Events.MANIFEST_PARSED    // 'manifest_parsed'
-Events.FEATURES_UPDATED   // 'features_updated'
-Events.LIVE_STATUS        // 'live_status'
-Events.ERROR              // 'error'
-Events.STATE_CHANGE       // 'state_change'
-Events.KERNEL_EVENT       // 'kernel_event'
+LOAD_START  MANIFEST_PARSED  FIRST_FRAME  PLAY  PAUSE  PLAYING  STALLED  RECOVERED
+RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
+VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
 ```
 
-Enum values are the corresponding snake_case strings, so `player.on(Events.FIRST_FRAME, cb)` is equivalent to `player.on('first_frame', cb)`.
+Plugins additionally dispatch two **standalone event names** (deliberately kept out of the `Events` enum — they belong to the optional side-channel provided by `preset: 'live'`, not to the playback kernel contract; integrations that never configure them will never receive them):
+
+```ts
+'live_status'              // LivePolling: live status changed
+LIVE_STATUS_ERROR_EVENT    // 'live_status_error': LivePolling request failed
+```
+
+> ⚠️ `BUFFER_UPDATE` is currently declared-but-never-emitted (a full search finds no `emit`). **Do not rely on it** —
+> call `bufferInfo()` for buffer levels, and judge low-buffer thresholds yourself (or fall back to the `stalled` event).
+
+### Live status polling and failure handling (LivePolling)
+
+`preset: 'live'` bundles `LivePolling`: give it a `PlayConfig.liveStatus` and it polls at a fixed interval, dispatching a structured `live_status` **only when the status changes** (deduplication keeps subscribers from re-rendering on every tick).
+
+**Failure semantics**: polling is a side-channel — a failure must never affect playback or trigger a reconnect. But "not disruptive" is not the same as "dies quietly":
+
+| Situation | What the integration sees |
+|---|---|
+| Polling works, the server status simply has not changed (expected) | "the status never changed" |
+| Polling has been failing continuously and is effectively dead (a fault) | "the status never changed" |
+
+The two are indistinguishable, so the latter makes you believe a false fact. Therefore:
+
+```js
+import { LIVE_STATUS_ERROR_EVENT } from '@fancaf/live-sdk'
+
+player.on('live_status', (s) => { /* { status, previousStatus, raw, time } */ })
+player.on(LIVE_STATUS_ERROR_EVENT, (e) => {
+  // { url, failCount, error, time }
+  // failCount: consecutive failures (reset to 0 on success) — tells jitter from a sustained outage
+})
+```
+
+- **Every failure is logged** (`logger.warn`, unthrottled — logs exist to be read by humans);
+- **Failures are also surfaced via the `live_status_error` event**, throttled by `failCount`: the **1st** failure
+  is reported immediately (a fault must be visible at once), then the **3rd**, **10th** and every 30th (30/60/90…)
+  afterwards — balancing "a sustained outage still emits a heartbeat signal" against "a long offline period
+  must not flood the reporting channel". The predicate is the static pure function
+  `LivePolling.shouldReportFailure(n)`, unit-testable;
+- **A standalone event rather than folding into `Events.ERROR`**: a 500 on the status endpoint must not be
+  recorded as "live playback failed", or the integration's `err.fatal` fallback branch, error-rate metrics
+  and Sentry capture all get polluted;
+- **Exponential backoff on failure**: interval = `min(interval × 2^failCount, maxInterval)` (`maxInterval`
+  defaults to 5 minutes and can be set before `start()`), reset to the base interval as soon as one request
+  succeeds — neither giving up nor hammering at a fixed interval;
+- **`res.ok` validation**: `fetch` does not reject on 4xx/5xx, so without checking `res.ok` a
+  "500 + JSON error body" neither enters `catch` nor yields a status field — a silent failure with no trace at all;
+- **Explicit status normalisation**: `{"status": 0}` (a number) is coerced with `String()`, otherwise it never
+  equals the string `lastStatus`, deduplication breaks entirely and every tick is misread as "status changed";
+- **`stop()` clears the pending handle and voids the in-flight round**: pausing on background / re-`start()`
+  leaves no stray timer pointing at a stale URL.
+
+| Member | Description |
+|---|---|
+| `start(url, interval?)` / `stop()` | Start / stop polling (also reachable via `Player#pollLiveStatus(interval?)`) |
+| `shouldReportFailure(failCount)` | Static throttling predicate |
+| `maxInterval` | Backoff ceiling in ms, default `300000` |
+
 
 ## Extension Points
 
@@ -684,13 +870,13 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ### Category 1: No VOD (controllable-timeline playback)
 
-> Root cause: live-sdk is a **live-streaming kernel** — a live timeline is constrained by the live edge and cannot be freely positioned. All "operations relative to the timeline" therefore fall outside the live contract. This is also why `seek` / `playbackRate` are not in the command set.
+> Root cause: live-sdk is a **live-streaming kernel** — a live timeline is constrained by the live edge and cannot be freely positioned, so "operations relative to the timeline" carry no meaning **in the live state**. `seek` / `setPlaybackRate` have entered the command set (to serve VOD / replay playback), but on an infinite live stream they are a **no-op** and **not recommended** respectively — a command existing does not erase the semantic boundary.
 
-| Not supported | Notes | If you need it |
+| Boundary item | Notes | Status |
 |---|---|---|
-| **Progressive VOD files** (plain `.mp4` direct playback) | A single-engine hls.js choice that does not do range requests / segment loading; "a complete MP4 file" and the chosen fMP4 streaming container are two different things | Attach a VOD kernel / `DashKernel`, or switch to mpegts.js |
-| **Playback rate (`playbackRate`)** | Live is an infinite linear stream; changing rate only breaks the "edge following / low latency" semantics — slowing down accumulates latency, speeding up repeatedly stalls when the buffer runs dry | Attach a VOD kernel; for genuine HLS VOD playback, use the native `player.media.playbackRate` property yourself |
-| **Positioning / seeking (`seek`)** | Live has no "jump to a position" semantics | Same as above, via the native `player.media.currentTime` property |
+| **Progressive VOD files** (plain `.mp4` direct playback) | A single-engine hls.js choice that does not do range requests / segment loading; "a complete MP4 file" and the chosen fMP4 streaming container are two different things | Still unsupported: attach a VOD kernel / `DashKernel`, or switch to mpegts.js |
+| **Playback rate (`setPlaybackRate`)** | Live is an infinite linear stream; changing rate only breaks the "edge following / low latency" semantics — slowing down accumulates latency, speeding up repeatedly stalls when the buffer runs dry | Command provided; **not recommended for the primary live scenario**, fine for VOD / replay |
+| **Positioning / seeking (`seek`)** | Live has no "jump to a position" semantics | Command provided, but a **no-op on an infinite live stream (`duration === Infinity`)**; works for VOD / replay (finite duration) |
 
 > **Note**: HLS VOD streams (`#EXT-X-ENDLIST`) **are supported** (through the same kernel); "no VOD" here specifically means the **timeline-relative operations** above and **progressive `.mp4` files**. See the technical specification §1.3.
 
@@ -739,6 +925,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 ## Documentation
 
 - [User stories (acceptance cases)](./docs/user-stories.md) — 45 cases in the format: goal / config / interaction / expectation
+- [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development
 
@@ -754,7 +941,7 @@ npm run typecheck     # type checking only
 Three-tier separation (see technical specification §8.3): **unit tests run against `src` logic; smoke and E2E run against the `dist` artifacts.**
 
 ```bash
-npm test              # Vitest unit tests (state machine / buffer semantics / backoff policy)
+npm test              # Vitest unit tests (state machine / buffer semantics / backoff / polling failures / session metrics)
 npm run test:watch    # unit tests in watch mode
 npm run test:coverage # unit tests + coverage
 

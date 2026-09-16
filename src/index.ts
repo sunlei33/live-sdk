@@ -24,11 +24,12 @@ export { WebEnvAdapter } from './env/WebEnvAdapter'
 export { ConsoleReporter } from './reporter/ConsoleReporter'
 export { SentryReporter } from './reporter/SentryReporter'
 export type { SentryLike } from './reporter/SentryReporter'
-export { LivePolling } from './plugins/LivePolling'
+export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 
 // —— 常量 ——
 export { Events, ERROR_CODE } from './constants'
+export type { SessionState } from './constants'
 
 // —— 工具 ——
 export { deepMerge, resolveContainer } from './utils/config'
@@ -55,6 +56,7 @@ export type {
   PlayInput,
   PlayerCommands,
   PlayerState,
+  SessionReport,
   NetworkTunable,
   NetworkConfig,
   FeatureKey,
@@ -62,6 +64,7 @@ export type {
   FeatureStatus,
   FeatureStatusReport,
   LiveStatusPayload,
+  LiveStatusErrorPayload,
   AppStateKey,
   PlayerError,
   RetryDiagnostic,

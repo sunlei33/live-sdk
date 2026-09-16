@@ -29,7 +29,11 @@ export class StateMachine {
     paused: { play: 'playing', ended: 'ended' },
     // stalled → ended：近尾卡顿且 buffer 已到末尾时，语义是「播完」而非「停滞待重连」
     // （部分内核如 Android WebView 解码器会近尾停推，但内容已放完）。
-    stalled: { recovered: 'playing', timeout: 'error', ended: 'ended' },
+    // stalled → paused：卡顿期间用户按下暂停。这条边必须显式存在 —— 否则迁移失败后
+    // 只靠 `onMediaPause` 的兜底分支翻转 `playing`，状态机会**停在 stalled**，
+    // 既让 `sessionState` 与事实不符（用户在暂停，却报「卡顿中」），
+    // 又会让「进行中的卡顿时长」永远得不到结算（少计）。
+    stalled: { recovered: 'playing', pause: 'paused', timeout: 'error', ended: 'ended' },
     error: { retry: 'loading', ended: 'ended' },
     ended: { play: 'playing', load: 'loading' },
   }

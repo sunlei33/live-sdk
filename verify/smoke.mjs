@@ -74,6 +74,14 @@ function check(name, cond) {
   if (!cond) failures++
 }
 
+// 未处理的 Promise 拒绝一律计为失败。
+// 动机：SDK 内部任何「创建了 Promise 却没消费」的路径（如内核异步 load 的 reject）
+// 在 Node 下默认**直接终止进程**，会把后面所有断言的输出全部吞掉 —— 排查时只能看到
+// 一个孤零零的栈，看不出真正的病灶。这里显式接住，让它变成一条可见的 FAIL 并保留完整报告。
+process.on('unhandledRejection', (err) => {
+  check(`出现未处理的 Promise 拒绝：${(err && err.message) || String(err)}`, false)
+})
+
 // 1. 构造 + 初始状态
 const p = createPlayer({ container: '#player', url: 'https://cdn/live.m3u8' })
 const s0 = p.getState()
@@ -485,6 +493,159 @@ check('destroy 后 root 已移除', true)
   els['video']._fire('playing')
   check('起播后封面图层隐藏', img.style.display === 'none')
   pPoster.destroy()
+}
+
+// 24. 修复验证：轮询失败可见（A3）
+//     病灶：① catch {} 是空的 —— 接入方无法区分「服务端状态没变」与「轮询已经死了」；
+//          ② fetch 对 4xx/5xx 不 reject，缺 res.ok 校验时「500 + JSON 错误体」
+//             连 catch 都进不去，是比静默更静默的失败；
+//          ③ 注释声称退避、实现是固定 setInterval，失败后按原间隔无脑撞墙。
+//     修复后：失败有日志 + 独立事件（按次数节流）+ 指数退避 + stop 不留野定时器。
+{
+  const realFetch = globalThis.fetch
+  const events = []
+  const statuses = []
+  let call = 0
+  globalThis.fetch = async () => {
+    call++
+    // 前 3 次失败（HTTP 500 + JSON 错误体：旧实现连 catch 都进不去），之后成功
+    return call <= 3
+      ? { ok: false, status: 500, json: async () => ({ code: 500 }) }
+      : { ok: true, status: 200, json: async () => ({ status: 'streaming' }) }
+  }
+  const hostPoll = createPlayer({ container: '#playerPoll', preset: [] })
+  const polling = new sdk.LivePolling()
+  hostPoll.on(sdk.LIVE_STATUS_ERROR_EVENT, (e) => events.push(e))
+  hostPoll.on('live_status', (s) => statuses.push(s))
+  hostPoll.registerPlugin(polling)
+
+  const warns = []
+  const origWarn = console.warn
+  console.warn = (...a) => warns.push(a.map(String).join(' '))
+  polling.start('https://api/status', 20) // base=20ms → 退避 40 / 80 / 160ms
+  // 等待足够久，让 3 次失败 + 1 次成功全部跑完（余量给得宽些，避免 CI 抖动）
+  await new Promise((r) => setTimeout(r, 600))
+  console.warn = origWarn
+  polling.stop()
+  const callsAtStop = call
+  await new Promise((r) => setTimeout(r, 80))
+
+  check('轮询失败有日志（旧实现为空 catch，完全静默）', warns.some((w) => w.includes('直播状态轮询失败')))
+  check('HTTP 500 也触发 live_status_error（旧实现连 catch 都进不去）', events.length > 0 && events[0].error === 'HTTP 500')
+  check('失败事件携带 url / failCount / error / time', events[0].url === 'https://api/status' && events[0].failCount === 1 && typeof events[0].time === 'number')
+  check('连续失败的事件被节流（事件数远少于请求数）', events.length < call && events.every((e) => e.failCount === 1 || e.failCount === 3))
+  check('节流判据 1/3/10/30 上报、2 不上报', sdk.LivePolling.shouldReportFailure(1) && !sdk.LivePolling.shouldReportFailure(2) && sdk.LivePolling.shouldReportFailure(10) && sdk.LivePolling.shouldReportFailure(30))
+  check('成功一次即派发 live_status 并复位退避', statuses.length === 1 && statuses[0].status === 'streaming')
+  check('stop() 后不再发起请求（无野定时器）', call === callsAtStop)
+  check('失败事件独立于 Events.ERROR（不污染播放错误通道）', sdk.LIVE_STATUS_ERROR_EVENT !== sdk.Events.ERROR)
+
+  polling.destroy()
+  hostPoll.destroy()
+  globalThis.fetch = realFetch
+}
+
+// 25. 修复验证：会话真相（sessionState / usingBackup）与会话级累计指标（乙类）
+//     B1/B2：状态机完整维护会话态、诊断里能算出是否备用流，但契约里没有出口 →
+//            接入方只能靠 playing + 事件序列自行反推（而 stalled 时 playing 仍为 true）。
+//     C1–C3：首帧耗时、卡顿次数与时长、观看时长都停留在接入方各自维护的样板变量里。
+{
+  const pSess = createPlayer({ container: '#playerSess', preset: [] })
+  const st0 = pSess.getState()
+  check('初始 sessionState=idle / usingBackup=false', st0.sessionState === 'idle' && st0.usingBackup === false)
+  const r0 = pSess.getSessionReport()
+  check('未起播时累计指标为初始值', r0.firstFrameCost === null && r0.loadStartTime === null && r0.stallCount === 0 && r0.stallDuration === 0 && r0.watchTime === 0)
+
+  await pSess.play({ url: 'https://cdn/sess.m3u8' })
+  check('起播后 sessionState=loading', pSess.getState().sessionState === 'loading')
+  check('起播后记录 loadStartTime', typeof pSess.getSessionReport().loadStartTime === 'number')
+
+  const vSess = els['video']
+  vSess._fire('loadedmetadata') // 原生回退路径的就绪信号
+  check('loadedmetadata → sessionState=ready', pSess.getState().sessionState === 'ready')
+  vSess._fire('loadeddata')
+  check('首帧信号后记录 firstFrameCost', typeof pSess.getSessionReport().firstFrameCost === 'number')
+
+  vSess._fire('playing')
+  check('playing 后 sessionState=playing', pSess.getState().sessionState === 'playing')
+  await new Promise((r) => setTimeout(r, 60))
+  check('播放中 watchTime 持续累计', pSess.getSessionReport().watchTime >= 20)
+
+  vSess._fire('waiting')
+  check('stalled：sessionState=stalled 但 playing 仍为 true（刻意分叉）', pSess.getState().sessionState === 'stalled' && pSess.getState().playing === true)
+  check('stalled：卡顿计数开始累计', pSess.getSessionReport().stallCount === 1)
+  const watchAtStall = pSess.getSessionReport().watchTime
+  await new Promise((r) => setTimeout(r, 40))
+  check('卡顿期间不计入观看时长，但计入卡顿时长', pSess.getSessionReport().watchTime === watchAtStall && pSess.getSessionReport().stallDuration >= 20)
+
+  vSess._fire('playing')
+  check('恢复后 sessionState 回到 playing', pSess.getState().sessionState === 'playing')
+  const stallSettled = pSess.getSessionReport().stallDuration
+  await new Promise((r) => setTimeout(r, 30))
+  check('恢复后卡顿时长不再增长（已结算）', pSess.getSessionReport().stallDuration === stallSettled)
+
+  await pSess.play({ url: 'https://cdn/sess2.m3u8' })
+  const r2 = pSess.getSessionReport()
+  check('新一轮起播重置全部累计指标', r2.stallCount === 0 && r2.stallDuration === 0 && r2.watchTime === 0 && r2.firstFrameCost === null)
+  check('瞬时指标不混入累计字段（瞬时 vs 累计语义分离）', !Object.keys(pSess.getStats()).some((k) => ['firstFrameCost', 'stallCount', 'stallDuration', 'watchTime', 'loadStartTime'].includes(k)))
+  pSess.destroy()
+}
+
+// 26. 修复验证：重连时内核 load 失败不得变成 unhandledrejection
+//     病灶：reload() 里 `this.kernel?.load(url)` 是**异步**的，外层同步 try/catch
+//     拦不住 Promise 的 reject —— 未消费时 Node/SSR 下直接崩进程，浏览器里落到
+//     `window.onunhandledrejection`（接入方全局错误监控会收到与播放无关的噪声，
+//     且这次重连失败本身也没进入 SDK 的错误通道）。
+{
+  let loads = 0
+  class ReloadFailKernel {
+    static kernelName = 'ReloadFailKernel'
+    static isSupported() {
+      return true
+    }
+    constructor(opts) {
+      this.capabilities = { lowLatency: false, qualitySwitch: false, abr: false, stats: 'basic', nativeFallback: true }
+      this.onEvent = opts.onEvent
+    }
+    async load() {
+      loads++
+      if (loads === 1) {
+        this.onEvent('manifest_parsed', {})
+        return
+      }
+      throw new Error('reload failed')
+    }
+    async switchURL() {}
+    switchQuality() {}
+    getStats() {
+      return {}
+    }
+    bufferInfo() {
+      return { buffers: [], behind: 0, remaining: 0, length: 0, totalRemaining: 0, totalLength: 0 }
+    }
+    recover() {}
+    destroy() {}
+    getLevels() {
+      return []
+    }
+    getCurrentLevel() {
+      return -1
+    }
+  }
+  const pReload = createPlayer({
+    container: '#playerReload',
+    kernel: ReloadFailKernel,
+    preset: [],
+    network: { retryCount: 2, retryDelay: 5, loadTimeout: 200 },
+  })
+  const codes = []
+  pReload.on('error', (e) => codes.push(e.code))
+  await pReload.play({ url: 'https://cdn/reload.m3u8' })
+  pReload.media._fire('playing')
+  els['video'].error = { code: 2, message: 'network interrupted' } // 可恢复错误 → 排一次重连
+  els['video']._fire('error')
+  await new Promise((r) => setTimeout(r, 120))
+  check('重连内核 load 失败已进入错误通道（Promise 被消费）', loads >= 2 && codes.includes('manifest_load_error'))
+  pReload.destroy()
 }
 
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)

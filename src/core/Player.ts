@@ -9,13 +9,13 @@ import { NativeKernel } from '../kernel/NativeKernel'
 import { ConsoleReporter } from '../reporter/ConsoleReporter'
 import { LivePolling } from '../plugins/LivePolling'
 import { WebEnvAdapter } from '../env/WebEnvAdapter'
-import { Events, ERROR_CODE, DEFAULT_CONFIG, DEFAULT_NETWORK_STRATEGY } from '../constants'
+import { Events, ERROR_CODE, DEFAULT_CONFIG, DEFAULT_NETWORK_STRATEGY, type SessionState } from '../constants'
 import { deepMerge, resolveContainer } from '../utils/config'
 import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../utils/sniffer'
 import { logger } from '../utils/logger'
 import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/retry'
 import { matchFeature } from '../utils/features'
-import { mapErrorCode, isFatalKernelError } from '../utils/errors'
+import { mapErrorCode, isFatalKernelError, mapMediaErrorCode } from '../utils/errors'
 import type {
   AppStateKey,
   BufferInfo,
@@ -40,6 +40,7 @@ import type {
   Quality,
   ReportRecord,
   RetryDiagnostic,
+  SessionReport,
   SideState,
   SpeedInfo,
   StatsInfo,
@@ -99,6 +100,30 @@ export class Player {
   private disposedSubs: Array<() => void> = []
   private posterEl: HTMLImageElement | null = null // overlay 模式的封面图层（懒建）
   private progressSecond = -1 // 已同步到快照的整秒位置（节流用）
+  /**
+   * LL-HLS 延迟的**运行时覆盖**（`setLiveLatency` 命令写入），null = 未覆盖、
+   * 回落到 `config.network` 的动态策略。与 config 分离是为了让「业务临时调低延迟」
+   * 不污染 `PlayerConfig`，且能被一键清除恢复。
+   */
+  private latencyOverride: { target?: number; max?: number } | null = null
+
+  // ─────────── 会话级累计指标（getSessionReport，见 types.ts#SessionReport） ───────────
+  // 全部以「已结算累计量 + 进行中时段起点」两段式记录：读的时候把进行中的一段
+  // 实时补上，不需要定时器轮询，也不会在暂停/卡顿时把时长算漏。
+  /** 本轮会话起播时刻（play() 新一轮起播时重置） */
+  private sessionLoadStartTime: number | null = null
+  /** 本轮会话首帧耗时（ms）；出首帧后不再改写，新一轮起播重置为 null */
+  private sessionFirstFrameCost: number | null = null
+  /** 已结算的「实际播放」累计时长（ms） */
+  private watchAccum = 0
+  /** 进入 playing 的时刻；非 playing 态为 null */
+  private watchSince: number | null = null
+  /** 已结算的卡顿累计时长（ms） */
+  private stallAccum = 0
+  /** 进入 stalled 的时刻；非 stalled 态为 null */
+  private stallSince: number | null = null
+  /** 本轮会话累计卡顿次数 */
+  private stallCount = 0
 
   constructor(config: PlayerConfig) {
     // 1. 解析容器
@@ -133,8 +158,13 @@ export class Player {
       muted: this.mediaProxy.muted,
       qualities: [],
       currentQuality: null,
+      // 会话真相由状态机在 onStateChange 里持续写入；此处与 StateMachine 的初值对齐
+      sessionState: 'idle',
+      usingBackup: false,
       currentTime: 0,
       duration: 0,
+      fullscreen: false,
+      playbackRate: this.mediaProxy.playbackRate,
       capabilities: this.emptyCapabilities(),
     }
     this.state = new StateStore(initial)
@@ -207,7 +237,11 @@ export class Player {
     this.applyPoster(cfg.poster)
     // 新一轮起播：进度归零，等待 loadedmetadata/timeupdate 回填
     this.progressSecond = -1
-    this.state.set({ muted, currentTime: 0, duration: 0 })
+    // 新一轮起播 = 新一轮会话：累计指标清零、备用流标记复位。
+    // **必须在 transition('load') 之前** —— onStateChange 会在状态迁移时结算
+    // 「进行中的 playing / stalled 时段」，若先迁移再重置，旧会话的尾巴会被算进新会话。
+    this.resetSession()
+    this.state.set({ muted, currentTime: 0, duration: 0, usingBackup: false })
     this.startLivePollingIfNeeded()
 
     this.retryCount = 0
@@ -275,6 +309,9 @@ export class Player {
     try {
       await this.kernel.switchURL(url)
       if (this.currentPlayConfig) this.currentPlayConfig.url = url
+      // 业务**主动**换源：不该再标记为「备用流中」（那是断流自动降级才有的状态）。
+      // 但会话统计不重置 —— 换源属于同一次观看行为，切开会让观看时长/卡顿次数断裂。
+      this.state.set({ usingBackup: false })
     } catch (err) {
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false))
       throw err
@@ -283,6 +320,61 @@ export class Player {
 
   requestFullscreen(): void {
     this.mediaProxy.requestFullscreen()
+  }
+
+  exitFullscreen(): void {
+    this.mediaProxy.exitFullscreen()
+  }
+
+  /**
+   * 定位到指定时间（秒），入参钳制到 `[0, duration]`。
+   *
+   * **直播无限流（`duration === Infinity`）下为 noop** —— 直播时间轴受 live edge 约束，
+   * 任意定位只会持续累积延迟（README「Non-Goals」）；点播 / 重播回放为正常用法。
+   */
+  seek(time: number): void {
+    if (this.destroyed) return
+    const duration = this.media.duration
+    if (!Number.isFinite(duration)) {
+      logger.debug('[live-sdk] seek 在直播无限流上不生效（点播/重播态可用）')
+      return
+    }
+    const upper = duration > 0 ? duration : time
+    const target = Math.min(Math.max(time, 0), upper)
+    this.mediaProxy.seek(target)
+    // 乐观更新：`timeupdate` 是异步的（~4Hz），业务在 seek() 后同步读
+    // getState().currentTime 会拿到旧值；此处先纠正快照与节流游标。
+    this.progressSecond = Math.floor(target)
+    this.state.set({ currentTime: target })
+  }
+
+  /**
+   * 设置倍速。**直播主场景不建议**（变速持续累积/消耗延迟、破坏边缘跟随）；
+   * 点播 / 重播回放为正常用法。写后读回，快照反映浏览器实际生效值（可能被钳制）。
+   */
+  setPlaybackRate(rate: number): void {
+    if (this.destroyed) return
+    try {
+      this.mediaProxy.playbackRate = rate
+    } catch {
+      logger.warn(`[live-sdk] 倍速入参非法，已忽略：${rate}`)
+      return
+    }
+    this.state.set({ playbackRate: this.mediaProxy.playbackRate })
+  }
+
+  /** 运行时更换封面（`undefined` / 空串 = 移除）；呈现方式仍由 `PlayerConfig.posterMode` 决定。 */
+  setPoster(poster?: string): void {
+    this.applyPoster(poster)
+  }
+
+  /**
+   * 运行时覆盖 LL-HLS 目标延迟（秒）。传空 = 清除本次覆盖、恢复 `config.network`
+   * 的动态策略；内核无 `setLiveLatency` 能力时静默忽略。
+   */
+  setLiveLatency(target?: number, max?: number): void {
+    this.latencyOverride = target === undefined && max === undefined ? null : { target, max }
+    this.applyLiveLatency()
   }
 
   // ═══════════════ 状态契约 ═══════════════
@@ -354,6 +446,59 @@ export class Player {
   speedInfo(): SpeedInfo {
     const s = this.getStats()
     return { speed: s.speed ?? 0, avgSpeed: s.avgSpeed ?? 0 }
+  }
+
+  /**
+   * 读取**会话级累计指标**：首帧耗时 / 卡顿次数与时长 / 实际播放时长 / 起播时刻。
+   *
+   * 与 `getStats()` 的分工（勿混）：
+   * - `getStats()` 是「此刻这一瞬间」的质量快照（码率 / fps / 丢帧），字段全 optional；
+   * - 本方法返回「本轮会话自起播以来」的累计量，字段一律有确切含义（详见 `SessionReport`）。
+   *
+   * 进行中的时段（正在播放 / 正在卡顿）会按「此刻 − 起点」实时计入，因此返回值
+   * 是调用当刻的准确值，无需等时段结束。这些量原本要靠每个接入方各写一份
+   * 「记时间戳 → 配对收口 → 维护计数器」的样板代码，且极易在配对边界上算错。
+   */
+  getSessionReport(): SessionReport {
+    const now = Date.now()
+    return {
+      firstFrameCost: this.sessionFirstFrameCost,
+      stallCount: this.stallCount,
+      stallDuration: this.stallAccum + (this.stallSince !== null ? now - this.stallSince : 0),
+      watchTime: this.watchAccum + (this.watchSince !== null ? now - this.watchSince : 0),
+      loadStartTime: this.sessionLoadStartTime,
+    }
+  }
+
+  /**
+   * 重置会话级累计指标。**只由 `play()` 的新一轮起播调用**（见 `SessionReport` 会话边界）。
+   *
+   * 这里直接清零而不是先结算：会话既然要重新开始，旧会话那段进行中的时长本就应该
+   * 被丢弃；若先结算再清零等于白算一次，反而容易让人误以为「旧数据被带进新会话」。
+   * 读接口 `getSessionReport()` 自己会补上进行中的一段，所以清零不会造成漏计。
+   */
+  private resetSession(): void {
+    this.watchAccum = 0
+    this.watchSince = null
+    this.stallAccum = 0
+    this.stallSince = null
+    this.stallCount = 0
+    this.sessionLoadStartTime = Date.now()
+    this.sessionFirstFrameCost = null
+  }
+
+  /** 结算进行中的「实际播放」时段（幂等：无进行中时段时为空操作）。 */
+  private settleWatch(now: number): void {
+    if (this.watchSince === null) return
+    this.watchAccum += now - this.watchSince
+    this.watchSince = null
+  }
+
+  /** 结算进行中的卡顿时段（幂等）。 */
+  private settleStall(now: number): void {
+    if (this.stallSince === null) return
+    this.stallAccum += now - this.stallSince
+    this.stallSince = null
   }
 
   report(type: ReportRecord['type'], data: Record<string, unknown>): void {
@@ -443,6 +588,9 @@ export class Player {
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
+    // 全屏中销毁：先退出全屏再拆 DOM，否则部分浏览器会把页面卡在全屏态
+    // （移除全屏元素虽通常触发自动退出，但不保证同步完成）。
+    if (this.mediaProxy.isFullscreen()) this.mediaProxy.exitFullscreen()
     // 清理定时器
     for (const t of this.timers) window.clearTimeout(t)
     this.timers.clear()
@@ -582,8 +730,8 @@ export class Player {
       if (this.stateMachine.current === 'loading') this.onManifestParsed({})
       this.syncProgress()
     })
-    on('loadeddata', () => this.emitFirstFrame())
-    on('canplay', () => this.emitFirstFrame())
+    on('loadeddata', () => this.onFirstFrameSignal())
+    on('canplay', () => this.onFirstFrameSignal())
     on('timeupdate', () => this.syncProgress())
     on('durationchange', () => this.syncProgress())
     on('playing', () => this.onMediaPlaying())
@@ -597,10 +745,40 @@ export class Player {
       this.emit(Events.ENDED)
     })
     on('volumechange', () => this.state.set({ volume: this.media.volume, muted: this.media.muted }))
-    on('error', () => {
-      // 原生 media error（NativeKernel 路径）
-      this.dispatchError(this.makeError(ERROR_CODE.NETWORK_ERROR, '媒体加载失败', false))
+    // 倍速也可能被外部（直接操作 media）改动：跟随同步并去重，避免重复渲染
+    on('ratechange', () => {
+      const rate = this.media.playbackRate
+      if (rate !== this.state.get().playbackRate) this.state.set({ playbackRate: rate })
     })
+    on('error', () => {
+      // 原生 media error（NativeKernel / 渐进式直连路径）。
+      // `<video>.error` 是 MediaError，其 `code` 是规范里的**定值枚举**、语义可靠 →
+      // 按 code 分派（详见 utils/errors.ts#mapMediaErrorCode）。
+      // 早期实现一律映射成 network_error，会把解码 / 格式类错误打进「接口与 CDN」，
+      // 使接入方按错误码做的分类上报整体错位。
+      const mediaError = this.media.error
+      const mapped = mapMediaErrorCode(mediaError?.code, mediaError?.message)
+      if (!mapped) return // code=1：换源 / 销毁引发的中止，不是故障
+      this.dispatchError(this.makeError(mapped.code, mediaError?.message || '媒体加载失败', mapped.fatal))
+    })
+
+    // —— 全屏状态同步 ——
+    // 标准 Fullscreen API 在 document 上派发；iOS 原生视频全屏走 video 私有事件，
+    // 且**不派发 fullscreenchange**。两条路径都要监听，否则 iOS 上全屏态永远不同步。
+    const onDoc = (name: string, fn: EventListener) => {
+      document.addEventListener(name, fn)
+      this.disposedSubs.push(() => document.removeEventListener(name, fn))
+    }
+    onDoc('fullscreenchange', () => this.syncFullscreen())
+    onDoc('webkitfullscreenchange', () => this.syncFullscreen())
+    on('webkitbeginfullscreen', () => this.syncFullscreen())
+    on('webkitendfullscreen', () => this.syncFullscreen())
+  }
+
+  /** 把全屏真实状态同步到快照（去重后写，避免重复事件驱动无意义的重渲染）。 */
+  private syncFullscreen(): void {
+    const full = this.mediaProxy.isFullscreen()
+    if (full !== this.state.get().fullscreen) this.state.set({ fullscreen: full })
   }
 
   private onMediaPlaying(): void {
@@ -619,9 +797,11 @@ export class Player {
   /**
    * media `pause` 事件 → 状态机。
    * 注意：`playing` 态下 `stall` 会先把状态机推到 `stalled`（此时 `playing` 快照仍为 true），
-   * 若用户此刻 pause，状态机停在 `stalled`，而 `paused` 表项不含 `stall → pause` 边，
-   * 迁移失败会导致 `playing` 快照永远为 true（按钮卡在「播放中」）。
-   * 因此这里以「实际媒体已暂停」为准：无论当前处于哪一态，只要快照仍标记为播放中，就强制纠正。
+   * 若用户此刻 pause，必须能迁到 `paused` —— 该边已在状态表中显式声明
+   * （见 StateMachine 的注释：缺这条边会让 `sessionState` 停在「卡顿中」，
+   * 且「进行中的卡顿时长」永远得不到结算）。
+   * 下面的兜底分支仅用于**其余**未覆盖的源状态（如 `loading`）：以「实际媒体已暂停」为准，
+   * 只要快照仍标记为播放中，就强制纠正，避免 UI 与内核状态分叉。
    */
   private onMediaPause(): void {
     // 初始化期噪声抑制：首帧前，浏览器/内核常派发伪 `pause` 事件
@@ -701,6 +881,32 @@ export class Player {
     this.emit(Events.FIRST_FRAME, { time: Date.now() })
     this.plugins.readyAll()
     this.kernelReady = true
+  }
+
+  /**
+   * 首帧信号入口（`loadeddata` / `canplay` 都会到，谁先到算谁）。拆成两步是因为
+   * 它们服务两个**生命周期不同**的语义：
+   * - `markSessionFirstFrame()`：本轮会话的首帧耗时 —— **每次起播都要重新计**；
+   * - `emitFirstFrame()`：`FIRST_FRAME` 事件 + `plugins.readyAll()` —— 历史行为是
+   *   **一次性闸门、二次起播不重置**（它兼作「插件可以开始工作了」的就绪信号，
+   *   重复派发没有意义，且 `applyPoster` 的隐藏逻辑依赖这个特性）。
+   *
+   * 早期实现只调 `emitFirstFrame()`，于是「切档 / 换源后重新起播」这条路径上闸门已关，
+   * 永远不会记录首帧耗时（`firstFrameCost` 停在 null）。两者必须分开。
+   */
+  private onFirstFrameSignal(): void {
+    this.markSessionFirstFrame()
+    this.emitFirstFrame()
+  }
+
+  /**
+   * 记录本轮会话首帧耗时（幂等：一轮会话只记第一次）。
+   * 不依赖 `firstFrameEmitted` —— 见 `onFirstFrameSignal` 的注释。
+   */
+  private markSessionFirstFrame(): void {
+    if (this.sessionFirstFrameCost !== null) return
+    if (this.sessionLoadStartTime === null) return // 未经 play()（如直接操作 media），无起播基准
+    this.sessionFirstFrameCost = Date.now() - this.sessionLoadStartTime
   }
 
   // ═══════════════ 内部：封面图层（posterMode） ═══════════════
@@ -820,8 +1026,23 @@ export class Player {
     })
   }
 
-  private onStateChange(next: 'idle' | 'loading' | 'ready' | 'playing' | 'paused' | 'stalled' | 'error' | 'ended'): void {
+  private onStateChange(next: SessionState): void {
     if (next === 'paused' || next === 'playing') this.mediaPaused = next === 'paused'
+
+    // —— 会话级累计指标：进入 / 离开 playing、stalled 各在此收口 ——
+    // 关键设计：**离开路径统一在这里结算，而不是只在 RECOVERED 里累加**。
+    // 卡顿并不总以 `RECOVERED` 结束 —— 期间可能迁到 `error`（重连）、`ended`（近尾判完）、
+    // 或被用户 `pause`；漏了任何一条，那段卡顿时长就永久少计（且很难被发现）。
+    // 在此集中结算后，新增任何状态迁移路径都自动被覆盖。
+    const now = Date.now()
+    this.settleWatch(now)
+    this.settleStall(now)
+    if (next === 'playing') this.watchSince = now
+    if (next === 'stalled') {
+      this.stallCount++
+      this.stallSince = now
+    }
+
     // `playing` 快照 = 「呈现给用户的播放/暂停语义」，不是会话态的机械映射：
     //   - `playing`  → true
     //   - `stalled`  → true（已起播只是缓冲，UI 仍是播放中）；但用户已显式暂停时除外
@@ -835,7 +1056,9 @@ export class Player {
     else if (next === 'stalled') playing = !this.mediaPaused
     else if (next === 'paused' || next === 'ended') playing = false
     else playing = this.playIntent && !this.mediaPaused
-    this.state.set({ playing })
+    // 与 `playing` 并列写入 `sessionState`：前者是呈现语义、后者是会话真相，
+    // 卡顿时二者刻意分叉（详见 PlayerState.sessionState 注释）。
+    this.state.set({ playing, sessionState: next })
   }
 
   // ═══════════════ 内部：错误分级与恢复 ═══════════════
@@ -900,16 +1123,32 @@ export class Player {
 
   private reload(code: string, diagnostic?: RetryDiagnostic): void {
     if (this.destroyed || !this.currentPlayConfig) return
-    const url = this.currentPlayConfig.backup && this.retryCount === 1 ? this.currentPlayConfig.backup : this.currentPlayConfig.url
+    const cfg = this.currentPlayConfig
+    const useBackup = !!cfg.backup && this.retryCount === 1
+    const url = useBackup ? (cfg.backup as string) : cfg.url
     const diag = this.buildDiagnostic(code, diagnostic?.delay ?? 0, url)
     logger.warn(`[live-sdk] 重连第 ${this.retryCount} 次 (${code}) → ${url}`, diag)
     // 若用户的意图仍是播放，重连期间保持按钮为「播放中」，避免 UI 在退避等待中闪现暂停图标
     this.mediaPaused = false
-    this.state.set({ playing: this.playIntent })
+    // 同步「当前是否在播备用流」：第 1 次重连换 backup，其后各次回主地址。
+    // 必须与 playing 在同一次 set 里跟上 —— 否则 UI 会一直显示「备用流中」，
+    // 而实际早已回到主源（接入方据此判断降级状态，错标会误导排查方向）。
+    this.state.set({ playing: this.playIntent, usingBackup: useBackup })
     this.emit(Events.LOAD_START, { url, retry: true, diagnostic: diag })
     try {
-      this.kernel?.load(url)
+      const pending = this.kernel?.load(url) as Promise<void> | undefined
       this.startLoadTimeout()
+      // `kernel.load()` 是**异步**的：外层 try/catch 只能拦住同步抛错，拦不住它的 reject。
+      // 不消费这个 Promise 会产生 unhandledrejection —— Node/SSR 下直接崩进程，
+      // 浏览器里落到 `window.onunhandledrejection`（接入方的全局错误监控会收到一条
+      // 与播放无关的噪声，且这次重连失败本身也不会进入 SDK 的错误通道）。
+      // 所以必须显式消费，并把它引回 SDK 的错误分级链路（继续重试直至耗尽）。
+      if (pending && typeof pending.catch === 'function') {
+        pending.catch((err) => {
+          if (this.destroyed) return
+          this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false, diag))
+        })
+      }
     } catch (err) {
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false, diag))
     }
@@ -965,10 +1204,16 @@ export class Player {
     return typeof t === 'function' ? t(this.currentQuality()) : t
   }
 
+  /**
+   * 应用目标延迟：**运行时覆盖优先，未覆盖项回落到 config 的动态策略**
+   * （按当前网络质量求值）。网络质量变化时由 bindEnv 重新调用本方法，
+   * 因此仅在覆盖了某一项时，另一项仍能随网络自适应。
+   */
   private applyLiveLatency(): void {
     if (!this.kernel?.setLiveLatency) return
-    const target = this.resolveTunable(this.config.network.targetLatency)
-    const max = this.resolveTunable(this.config.network.maxLatency)
+    const o = this.latencyOverride
+    const target = o?.target ?? this.resolveTunable(this.config.network.targetLatency)
+    const max = o?.max ?? this.resolveTunable(this.config.network.maxLatency)
     this.kernel.setLiveLatency(target, max)
   }
 

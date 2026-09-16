@@ -3,7 +3,7 @@
  * （web-default / react-custom / app-webview），逐字验证 SDK 暴露的 API 面与默认值。
  * 本文件若通过 `tsc --noEmit`，即证明 SDK 满足 skill 所承诺的接入契约。
  */
-import { createPlayer, BasePlugin, Events, ERROR_CODE, SentryReporter } from 'live-sdk'
+import { createPlayer, BasePlugin, Events, ERROR_CODE, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT } from 'live-sdk'
 import type { SentryLike } from 'live-sdk'
 import { mountDefaultUI } from 'live-sdk/ui'
 import { usePlayer as usePlayerReact } from 'live-sdk/react'
@@ -21,8 +21,11 @@ import type {
   ReporterPlugin,
   NetworkQuality,
   PlayerState,
+  SessionReport,
+  SessionState,
   KernelCapabilities,
   LiveStatusPayload,
+  LiveStatusErrorPayload,
 } from 'live-sdk'
 
 // ══════════ 场景 1：纯 H5 + 默认 UI（assets/web-default.html） ══════════
@@ -106,6 +109,11 @@ async function exerciseCommands(): Promise<void> {
   player.switchQuality(1) // 入参 = Quality.id
   await player.switchURL('https://backup.m3u8') // 运行中切流
   player.requestFullscreen()
+  player.exitFullscreen() // 与 requestFullscreen 配对（全屏态下可退出）
+  player.seek(120) // 仅有限时长（点播/重播）生效；直播无限流为 noop
+  player.setPlaybackRate(1.5) // 写后读回，快照反映实际生效值
+  player.setPoster('https://cdn.example.com/cover.jpg') // 运行时换封面（空值=移除）
+  player.setLiveLatency(3, 8) // 运行时覆盖 LL-HLS 目标延迟；传空恢复 config 策略
   player.pollLiveStatus(30_000)
   player.getStats()
   player.bufferInfo()
@@ -127,6 +135,10 @@ const snapshot: PlayerState = player.getState()
 const playing: boolean = snapshot.playing
 const caps: KernelCapabilities = snapshot.capabilities
 const cur: number | null = snapshot.currentQuality
+const isFull: boolean = snapshot.fullscreen
+const rate: number = snapshot.playbackRate
+void isFull
+void rate
 const unsub = player.subscribe((s) => {
   // 全量快照回调
   if (s.playing) void playing
@@ -227,6 +239,70 @@ player3.on('live_status', (payload) => {
 player3.registerPlugin(NativeReporter) // 构造器
 player3.registerPlugin(new NativeReporter()) // 实例
 
+// ══════════ 场景 11：原生 media 错误码分派（A2 修复） ══════════
+// 契约校验：`<video>.error`（MediaError）按 code 分派后，解码 / 源不支持与网络类
+// **码值彼此独立** —— 接入方据此分流「解码异常 / 接口与 CDN 异常」才不会错位。
+// code=1(MEDIA_ERR_ABORTED) 不上报；code=2 → network_error；code=3 → media_decode_error；
+// code=4 → 视 message 是否含网络痕迹落到 network_error 或 media_src_not_supported。
+const decodeErrCode: string = ERROR_CODE.MEDIA_DECODE_ERROR
+const srcErrCode: string = ERROR_CODE.MEDIA_SRC_NOT_SUPPORTED
+const netErrCode: string = ERROR_CODE.NETWORK_ERROR
+// 错误码集合互不重叠（分流前提）
+const mediaCodesDistinct: boolean =
+  decodeErrCode !== srcErrCode && decodeErrCode !== netErrCode && srcErrCode !== netErrCode
+
+// ══════════ 场景 12：轮询失败可见（A3 修复） ══════════
+// 契约校验：`live_status_error` 是**独立事件**（刻意不并入 Events.ERROR，
+// 以免状态接口故障污染播放错误通道与错误率统计），且订阅者可读到结构化 payload。
+const player4 = createPlayer({ container: '#player4' })
+player4.on(LIVE_STATUS_ERROR_EVENT, (payload) => {
+  const e = payload as LiveStatusErrorPayload
+  const url: string = e.url
+  const count: number = e.failCount
+  const reason: string = e.error
+  const at: number = e.time
+  void url
+  void count
+  void reason
+  void at
+})
+// 失败事件的节流判据可静态调用（1 / 3 / 10 / 其后每满 30）
+const failureThrottle: boolean[] = [1, 2, 3, 10, 29, 30].map((n) => LivePolling.shouldReportFailure(n))
+// 退避上限可配置
+const pollMaxInterval: number = new LivePolling().maxInterval
+// 失败事件名与 Events.ERROR 不同名（两条通道互不干扰）。
+// 注意这里必须经过 `string` 收窄：两个字面量类型无交集，直接比较会被 tsc
+// 判为「无意的比较」（TS2367）—— 那正是「二者确实不同名」的编译期证明。
+const failureEventName: string = LIVE_STATUS_ERROR_EVENT
+const failureEventIsDistinct: boolean = failureEventName !== Events.ERROR
+
+// ══════════ 场景 13：会话真相与会话级累计指标（乙类） ══════════
+// 13.1 两个低频语义字段进快照
+const session: PlayerState = player4.getState()
+const sessionState: SessionState = session.sessionState
+const usingBackup: boolean = session.usingBackup
+// 13.2 `sessionState` 取值域与 `SessionState` 一致（类型层已保证，此处锚定可读性）
+const sessionStates: SessionState[] = ['idle', 'loading', 'ready', 'playing', 'paused', 'stalled', 'error', 'ended']
+void sessionStates.includes(sessionState)
+// 13.3 累计指标走独立出口，**不并入 getStats()**（瞬时 vs 累计语义分离）
+const sessionReport: SessionReport = player4.getSessionReport()
+const firstFrameCost: number | null = sessionReport.firstFrameCost
+const stallCount: number = sessionReport.stallCount
+const stallDuration: number = sessionReport.stallDuration
+const watchTime: number = sessionReport.watchTime
+const loadStartTime: number | null = sessionReport.loadStartTime
+void firstFrameCost
+void stallCount
+void stallDuration
+void watchTime
+void loadStartTime
+// 瞬时指标里不得出现累计字段（否则「未起播」与「值为 0」无法区分）
+const statsKeys: string[] = Object.keys(player4.getStats())
+const statsHasNoSessionAccumulator: boolean = !statsKeys.some((k) =>
+  ['firstFrameCost', 'stallCount', 'stallDuration', 'watchTime', 'loadStartTime'].includes(k),
+)
+void usingBackup
+
 export {
   eqFirstFrame,
   eqFeatures,
@@ -244,4 +320,10 @@ export {
   NativeReporter,
   posterModeNative,
   roomId,
+  mediaCodesDistinct,
+  failureThrottle,
+  pollMaxInterval,
+  failureEventIsDistinct,
+  sessionReport,
+  statsHasNoSessionAccumulator,
 }

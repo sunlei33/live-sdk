@@ -126,18 +126,33 @@ export class QualityPanel extends UIPlugin {
   }
 }
 
-/** 全屏按钮 */
+/** 全屏切换按钮（图标与点击方向都随 `PlayerState.fullscreen` 变化） */
 export class FullscreenButton extends UIPlugin {
   private btn!: HTMLButtonElement
   mount(root: HTMLElement, player: Player): void {
     this.btn = document.createElement('button')
     this.btn.className = 'live-sdk-btn'
-    this.btn.textContent = '⛶'
+    this.btn.title = '全屏'
+    this.btn.setAttribute('aria-label', '全屏')
     root.appendChild(this.btn)
-    this.track(bindPress(this.btn, () => player.requestFullscreen()))
+    this.unsub = player.subscribe((s) => {
+      // 进入/退出共用一枚按钮：全屏态换成「还原」图标并同步提示文案
+      this.btn.textContent = s.fullscreen ? '⧉' : '⛶'
+      this.btn.title = s.fullscreen ? '退出全屏' : '全屏'
+      this.btn.setAttribute('aria-label', s.fullscreen ? '退出全屏' : '全屏')
+    })
+    this.track(
+      bindPress(this.btn, () => {
+        // 以快照的全屏态决定方向——早期实现只会 requestFullscreen()，
+        // 全屏后按钮再点无效（用户被困在全屏，只能靠系统 Esc/手势退出）。
+        if (player.getState().fullscreen) player.exitFullscreen()
+        else player.requestFullscreen()
+      }),
+    )
   }
   unmount(): void {
     this.disposeAll()
+    this.unsub?.()
     this.btn?.remove()
   }
 }
