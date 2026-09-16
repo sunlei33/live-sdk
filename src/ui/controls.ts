@@ -147,7 +147,10 @@ export class FullscreenButton extends UIPlugin {
         // 以快照的全屏态决定方向——早期实现只会 requestFullscreen()，
         // 全屏后按钮再点无效（用户被困在全屏，只能靠系统 Esc/手势退出）。
         if (player.getState().fullscreen) player.exitFullscreen()
-        else player.requestFullscreen()
+        // 全屏 player.root（容器级）而非 <video>：控件栏挂在 root 内，
+        // 只全屏 <video> 会让控件栏在全屏后消失（自相矛盾）。
+        // iOS 无元素全屏能力时由 SDK 内部回退原生视频全屏。
+        else player.requestFullscreen(player.root)
       }),
     )
   }

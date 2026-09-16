@@ -292,6 +292,68 @@ describe('setAppState 业务扩展位', () => {
   })
 })
 
+describe('requestFullscreen(target?)（TODO-9）', () => {
+  it('缺省 → 全屏 <video>（保持既有行为）', () => {
+    const p = createPlayer()
+    let videoCalls = 0
+    video.requestFullscreen = () => {
+      videoCalls++
+      return Promise.resolve()
+    }
+    p.requestFullscreen()
+    expect(videoCalls).toBe(1)
+  })
+
+  it('传目标元素 → 全屏该元素，且不误触 <video>', () => {
+    const p = createPlayer()
+    const root = p.root as HTMLElement & { requestFullscreen?: () => Promise<void> }
+    let rootCalls = 0
+    let videoCalls = 0
+    root.requestFullscreen = () => {
+      rootCalls++
+      return Promise.resolve()
+    }
+    video.requestFullscreen = () => {
+      videoCalls++
+      return Promise.resolve()
+    }
+    p.requestFullscreen(p.root)
+    expect(rootCalls).toBe(1)
+    expect(videoCalls).toBe(0)
+  })
+
+  it('【回归】容器全屏时 fullscreen 快照同步为 true（早先只认 <video> 全屏）', () => {
+    const p = createPlayer()
+    const root = p.root as HTMLElement
+    // 容器「包含」video —— 模拟文档全屏元素为 video 的祖先
+    ;(root as unknown as { contains: (n: unknown) => boolean }).contains = (n) => n === video
+    expect(p.getState().fullscreen).toBe(false)
+    dom.doc.fullscreenElement = root
+    dom.doc._fire('fullscreenchange')
+    expect(p.getState().fullscreen).toBe(true)
+    // 退出容器全屏 → 回到 false
+    dom.doc.fullscreenElement = null
+    dom.doc._fire('fullscreenchange')
+    expect(p.getState().fullscreen).toBe(false)
+  })
+
+  it('<video> 自身全屏同样同步为 true', () => {
+    const p = createPlayer()
+    dom.doc.fullscreenElement = video as unknown as Element
+    dom.doc._fire('fullscreenchange')
+    expect(p.getState().fullscreen).toBe(true)
+  })
+
+  it('iOS 原生视频全屏（webkitDisplayingFullscreen）同步为 true', () => {
+    const p = createPlayer()
+    ;(video as unknown as { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen = true
+    dom.doc.fullscreenElement = null
+    // iOS 原生视频全屏不派发 fullscreenchange，走 <video> 私有事件
+    video._fire('webkitbeginfullscreen')
+    expect(p.getState().fullscreen).toBe(true)
+  })
+})
+
 describe('PlayerState 新增低频语义字段（sessionState / usingBackup）', () => {
   it('sessionState 跟随状态机；stalled 时 playing 仍为 true（二者刻意分叉）', async () => {
     const p = createPlayer()

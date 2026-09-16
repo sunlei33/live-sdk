@@ -32,6 +32,11 @@ function makeEl(tag) {
     play() { this.paused = false; return Promise.resolve() },
     pause() { this.paused = true },
     canPlayType() { return '' },
+    // 真实 DOM 的 Element.contains：递归查子节点，供全屏态「祖先链」判定使用
+    contains(n) {
+      if (n === this) return true
+      return (this.children || []).some((c) => c && typeof c.contains === 'function' && c.contains(n))
+    },
     addEventListener(t, fn) { (listeners[t] ||= []).push(fn) },
     removeEventListener(t, fn) { const l = listeners[t] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1) },
     _fire(t) { (listeners[t] || []).forEach((f) => f()) },
@@ -46,12 +51,19 @@ globalThis.window = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (id) => clearTimeout(id),
 }
+const docListeners = {}
 globalThis.document = {
   visibilityState: 'visible',
+  fullscreenElement: null, // 测试可写，驱动 PlayerState.fullscreen 同步
   createElement: (tag) => (els[tag] ||= makeEl(tag)),
   querySelector: () => container,
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(t, fn) { (docListeners[t] ||= []).push(fn) },
+  removeEventListener(t, fn) {
+    const l = docListeners[t] || []
+    const i = l.indexOf(fn)
+    if (i >= 0) l.splice(i, 1)
+  },
+  _fire(t) { (docListeners[t] || []).forEach((f) => f()) },
 }
 Object.defineProperty(globalThis, 'navigator', {
   value: {
@@ -646,6 +658,32 @@ check('destroy 后 root 已移除', true)
   await new Promise((r) => setTimeout(r, 120))
   check('重连内核 load 失败已进入错误通道（Promise 被消费）', loads >= 2 && codes.includes('manifest_load_error'))
   pReload.destroy()
+}
+
+// 24. 修复验证：requestFullscreen(target?) 与容器级全屏识别（TODO-9）
+{
+  const pFs = createPlayer({ container: '#playerFs' })
+  // 24.1 缺省 → 全屏 <video>（保持既有行为）
+  let videoFs = 0
+  els['video'].requestFullscreen = () => { videoFs++; return Promise.resolve() }
+  pFs.requestFullscreen()
+  check('requestFullscreen() 缺省全屏 <video>', videoFs === 1)
+
+  // 24.2 传容器 → 全屏容器本身，且不误触 <video>（自绘控件随之可见）
+  let rootFs = 0
+  pFs.root.requestFullscreen = () => { rootFs++; return Promise.resolve() }
+  pFs.requestFullscreen(pFs.root)
+  check('requestFullscreen(容器) 全屏该容器', rootFs === 1)
+  check('requestFullscreen(容器) 不误触 <video>', videoFs === 1)
+
+  // 24.3 容器全屏 → fullscreen 快照同步（回归：早先只认 <video> 全屏，容器全屏恒 false）
+  globalThis.document.fullscreenElement = pFs.root
+  globalThis.document._fire('fullscreenchange')
+  check('容器全屏时 state.fullscreen=true', pFs.getState().fullscreen === true)
+  globalThis.document.fullscreenElement = null
+  globalThis.document._fire('fullscreenchange')
+  check('退出容器全屏后 state.fullscreen=false', pFs.getState().fullscreen === false)
+  pFs.destroy()
 }
 
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)

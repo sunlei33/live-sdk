@@ -362,8 +362,22 @@ export class Player {
     await this.hookAfter('switchURL', ctx, true)
   }
 
-  requestFullscreen(): void {
-    this.mediaProxy.requestFullscreen()
+  /**
+   * 请求全屏（TODO-9）。
+   *
+   * @param target 期望全屏的元素。缺省 = `<video>`（历史行为，兼容不变）。
+   *
+   * 传容器元素（例如 `player.root`，或业务自己的外层容器）则做**容器级全屏** ——
+   * 自绘控件与默认 UI 控件栏都挂在容器内，容器全屏后它们仍可见可点；
+   * 只全屏 `<video>` 时控件会消失（`<video>` 不能有子元素，其兄弟节点不在全屏范围内）。
+   *
+   * iOS Safari 不支持普通元素全屏时，自动回退原生视频全屏（控件不可见，但至少能全屏）；
+   * 无任何全屏能力的环境静默降级（全屏非核心能力）。
+   *
+   * 无论全屏的是 video 还是容器，`PlayerState.fullscreen` 都会正确同步。
+   */
+  requestFullscreen(target?: Element): void {
+    this.mediaProxy.requestFullscreen(target)
   }
 
   exitFullscreen(): void {

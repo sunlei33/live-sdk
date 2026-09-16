@@ -2,6 +2,8 @@
  * MediaProxy：抽象原生 <video>，抹平浏览器差异（内联播放 / 全屏 / 属性）。
  * 内核创建并持有 video（创建权不开放给接入方），暴露 el 供 hls.js 挂载。
  */
+import { isPlayerFullscreen, resolveFullscreenPlan, type FullscreenTarget, type FullscreenVideo } from '../utils/fullscreen'
+
 export class MediaProxy {
   readonly el: HTMLVideoElement
 
@@ -71,20 +73,35 @@ export class MediaProxy {
     this.el.pause()
   }
 
-  requestFullscreen(): void {
-    const el = this.el as HTMLVideoElement & {
-      webkitEnterFullscreen?: () => void
-      webkitRequestFullscreen?: () => void
-    }
+  /**
+   * 请求全屏。
+   *
+   * @param target 期望全屏的元素。缺省为 `<video>`（历史行为）；
+   *   传容器元素则做**容器级全屏** —— 自绘控件/默认 UI 控件栏挂在该容器内，
+   *   容器全屏后它们仍然可见可点（`<video>` 不能有子元素，全屏 video 会让控件消失）。
+   *
+   * 选路与 iOS 回退见 `resolveFullscreenPlan`：iOS Safari 不支持普通元素全屏时
+   * 自动回退到原生视频全屏（控件不可见，但至少能全屏）。
+   */
+  requestFullscreen(target?: Element): void {
+    const plan = resolveFullscreenPlan(target, this.el)
     try {
-      if (el.webkitEnterFullscreen) {
-        // iOS Safari 内联全屏（不走 Fullscreen API，需用 webkit 私有方法）
-        el.webkitEnterFullscreen()
-      } else if (el.requestFullscreen) {
-        // 返回 Promise：被拒绝（非用户手势 / 权限策略）时必须消费，否则抛 unhandledrejection
-        void el.requestFullscreen().catch(() => undefined)
-      } else if (el.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen()
+      switch (plan.api) {
+        case 'webkitEnterFullscreen':
+          // iOS Safari 内联全屏（不走 Fullscreen API，需用 webkit 私有方法）
+          ;(plan.element as FullscreenVideo).webkitEnterFullscreen?.()
+          break
+        case 'requestFullscreen': {
+          // 返回 Promise：被拒绝（非用户手势 / 权限策略）时必须消费，否则抛 unhandledrejection
+          const p = (plan.element as FullscreenTarget).requestFullscreen?.()
+          void p?.catch(() => undefined)
+          break
+        }
+        case 'webkitRequestFullscreen':
+          ;(plan.element as FullscreenTarget).webkitRequestFullscreen?.()
+          break
+        case 'none':
+          break
       }
     } catch {
       /* 老 WebView 同步抛错：全屏非核心能力，静默降级 */
@@ -132,14 +149,13 @@ export class MediaProxy {
   }
 
   /**
-   * 是否处于全屏。除标准 Fullscreen API 外还要认 iOS 原生视频全屏 ——
-   * 后者**不体现在 `document.fullscreenElement`**（它由 video 私有状态标记），
-   * 只判 API 会在 iOS 上恒为 false，导致全屏态永远不同步、退出按钮无从触发。
+   * 是否处于全屏。除标准 Fullscreen API 外还要认两件事（见 `isPlayerFullscreen`）：
+   * - iOS 原生视频全屏（`webkitDisplayingFullscreen`，不体现在 `document.fullscreenElement`）；
+   * - **容器级全屏**（`fullscreenElement` 是 `<video>` 的祖先）——
+   *   早先只判 `=== this.el`，容器全屏时恒为 false，全屏态不同步。
    */
   isFullscreen(): boolean {
-    const el = this.el as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }
-    if (el.webkitDisplayingFullscreen) return true
-    return this.getFullscreenElement() === this.el
+    return isPlayerFullscreen(this.el, this.getFullscreenElement())
   }
 
   destroy(): void {

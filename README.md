@@ -161,7 +161,7 @@ interface PlayerState {
   usingBackup: boolean          // 当前是否在播 PlayConfig.backup 备用流
   currentTime: number           // 播放位置；按「整秒变化」节流更新
   duration: number              // 总时长；直播为 Infinity
-  fullscreen: boolean           // 兼容标准 Fullscreen API 与 iOS 原生视频全屏
+  fullscreen: boolean           // 覆盖三种来源：标准全屏 / 容器级全屏（含 video 的祖先）/ iOS 原生视频全屏
   playbackRate: number          // 当前倍速（经浏览器钳制后读回的真实值）
   capabilities: KernelCapabilities
   [ext: `app.${string}`]: unknown
@@ -217,7 +217,7 @@ player.on('features_updated', (report) => {
 | `mute(m)` / `setVolume(v)` | `void` | 静音 / 音量 |
 | `switchQuality(id)` | `Promise<void>` | 切清晰度（`Quality.id`；`-1` 恢复自动 ABR）。返回 Promise 是因为内部会 `await` 钩子；语句式调用无需 `await` |
 | `switchURL(url)` | `Promise<void>` | 运行中切流（保留会话状态） |
-| `requestFullscreen()` / `exitFullscreen()` | `void` | 进入 / 退出全屏（iOS 原生视频全屏亦可退出） |
+| `requestFullscreen(target?)` / `exitFullscreen()` | `void` | 进入 / 退出全屏（iOS 原生视频全屏亦可退出）。**传 `target` 可指定全屏元素**：缺省全屏 `<video>`；传容器（如 `player.root`）做容器级全屏，自绘控件在全屏内仍可见可点 |
 | `seek(time)` | `void` | 定位（秒），自动钳制到 `[0, duration]`。**直播无限流下为 noop**；点播/重播正常生效 |
 | `setPlaybackRate(rate)` | `void` | 设置倍速，写后读回。**直播主场景不建议**（变速会持续累积/消耗延迟）；点播/重播为正常用法 |
 | `setPoster(poster?)` | `void` | 运行时更换封面（空值 = 移除）；呈现方式仍由 `posterMode` 决定 |
@@ -494,7 +494,7 @@ createPlayer({ container: '#player', preset: [MyReporter] })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 45 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 47 条用例，格式：目标 / 配置 / 交互 / 预期
 - [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
@@ -687,7 +687,7 @@ interface PlayerState {
   usingBackup: boolean          // whether PlayConfig.backup is currently in use
   currentTime: number           // playback position; throttled to whole-second changes
   duration: number              // total duration; Infinity for live
-  fullscreen: boolean           // covers both the standard Fullscreen API and iOS native video fullscreen
+  fullscreen: boolean           // three sources: standard fullscreen / container-level (an ancestor of video) / iOS native video fullscreen
   playbackRate: number          // effective rate, read back after browser clamping
   capabilities: KernelCapabilities
   [ext: `app.${string}`]: unknown
@@ -744,7 +744,7 @@ player.on('features_updated', (report) => {
 | `mute(m)` / `setVolume(v)` | `void` | Mute / volume |
 | `switchQuality(id)` | `Promise<void>` | Switch quality (`Quality.id`; `-1` restores auto ABR). Returns a Promise because it awaits hooks; statement-style calls need no `await` |
 | `switchURL(url)` | `Promise<void>` | Switch stream at runtime (session state preserved) |
-| `requestFullscreen()` / `exitFullscreen()` | `void` | Enter / exit fullscreen (iOS native video fullscreen can also be exited) |
+| `requestFullscreen(target?)` / `exitFullscreen()` | `void` | Enter / exit fullscreen (iOS native video fullscreen can also be exited). **Pass `target` to choose the element**: defaults to `<video>`; pass a container (e.g. `player.root`) for container-level fullscreen so custom controls stay visible and clickable |
 | `seek(time)` | `void` | Seek (seconds), auto-clamped to `[0, duration]`. **No-op on an infinite live stream**; works for VOD / replay |
 | `setPlaybackRate(rate)` | `void` | Set playback rate, read back afterwards. **Not recommended for the primary live scenario** (rate changes accumulate/consume latency); fine for VOD / replay |
 | `setPoster(poster?)` | `void` | Swap the poster at runtime (empty = remove); rendering still follows `posterMode` |
@@ -1025,7 +1025,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 45 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 47 cases in the format: goal / config / interaction / expectation
 - [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development

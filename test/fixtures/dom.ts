@@ -119,11 +119,12 @@ export function makeEl(tag: string): FakeMediaElement {
 
 /**
  * 安装最小 DOM 环境到 globalThis（window / document / navigator）。
- * 返回 `reset()` 以便测试间清理。
+ * 返回 `reset()` 以便测试间清理，以及 `doc`（可派发 document 事件，如 fullscreenchange）。
  */
-export function installDom(): { els: Record<string, FakeMediaElement>; reset: () => void } {
+export function installDom(): { els: Record<string, FakeMediaElement>; doc: FakeDocument; reset: () => void } {
   const els: Record<string, FakeMediaElement> = {}
   const container = makeEl('div')
+  const docListeners: Record<string, Array<(...args: unknown[]) => void>> = {}
   const prev = {
     window: (globalThis as Record<string, unknown>).window,
     document: (globalThis as Record<string, unknown>).document,
@@ -138,13 +139,27 @@ export function installDom(): { els: Record<string, FakeMediaElement>; reset: ()
     setInterval: (fn: () => void, ms?: number) => setInterval(fn, ms),
     clearInterval: (id?: number) => clearInterval(id as never),
   }
-  ;(globalThis as Record<string, unknown>).document = {
+
+  const doc: FakeDocument = {
     visibilityState: 'visible',
+    // 全屏元素：测试可写，用于驱动 PlayerState.fullscreen 同步
+    fullscreenElement: null,
     createElement: (tag: string) => (els[tag] ||= makeEl(tag)),
     querySelector: () => container,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(t, fn) {
+      ;(docListeners[t] ||= []).push(fn)
+    },
+    removeEventListener(t, fn) {
+      const l = docListeners[t] || []
+      const i = l.indexOf(fn)
+      if (i >= 0) l.splice(i, 1)
+    },
+    _fire(t, ...args) {
+      ;(docListeners[t] || []).forEach((f) => f(...args))
+    },
   }
+  ;(globalThis as Record<string, unknown>).document = doc
+
   Object.defineProperty(globalThis, 'navigator', {
     value: {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0)',
@@ -160,6 +175,7 @@ export function installDom(): { els: Record<string, FakeMediaElement>; reset: ()
 
   return {
     els,
+    doc,
     reset() {
       for (const [k, v] of Object.entries(prev)) {
         if (v === undefined) delete (globalThis as Record<string, unknown>)[k]
@@ -167,4 +183,15 @@ export function installDom(): { els: Record<string, FakeMediaElement>; reset: ()
       }
     },
   }
+}
+
+/** 最小 document：除 DOM 装配外，支持 `fullscreenElement` 写入与事件派发 */
+export interface FakeDocument {
+  visibilityState: string
+  fullscreenElement: Element | null
+  createElement(tag: string): FakeMediaElement
+  querySelector(sel: string): FakeMediaElement
+  addEventListener(t: string, fn: (...args: unknown[]) => void): void
+  removeEventListener(t: string, fn: (...args: unknown[]) => void): void
+  _fire(t: string, ...args: unknown[]): void
 }

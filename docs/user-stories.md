@@ -531,7 +531,7 @@
 
 ---
 
-## 十一、业务实测反馈修复（0.2.0）
+## 十二、业务实测反馈修复（0.2.0）
 
 ### US-39 起播级 autoplay：只加载不自动播
 
@@ -597,6 +597,42 @@
   2. 传实例：SDK **复用**传入的同一对象（`registerPlugin(x) === x`），同样调用 `create` / `init`，业务可继续持有并使用该引用。
   3. 同名插件重复注册被忽略（返回已有实例，不重复初始化）。
   4. `preset` 数组仍只接受构造器。
+
+---
+
+## 十三、全屏目标与容器级全屏（0.5.0）
+
+### US-44 指定全屏目标（`requestFullscreen(target?)`）
+
+- **目标**：自绘控件挂在容器里（`<video>` 不能有子元素），全屏后不能消失。
+- **配置**：默认；自绘控件栏挂在业务容器内（或直接用 `mountDefaultUI(player)`）。
+- **交互**：
+  1. `player.requestFullscreen()`（不传参）。
+  2. 退出后 `player.requestFullscreen(player.root)`。
+  3. 退出后传业务自己的外层容器。
+- **预期**：
+  1. 不传参 → 全屏 `<video>`（历史行为，兼容不变）。
+  2. 传容器 → **全屏该容器**：全屏内自绘控件/控件栏仍**可见、可点**（播放、暂停、切档、退出全屏均可用）。
+  3. 传容器时不会误触 `<video>` 全屏。
+  4. iOS Safari 不支持普通元素全屏时，**自动回退原生视频全屏**（控件不可见，但至少能全屏，不是「点了没反应」）。
+  5. 无任何全屏能力的环境静默降级，不抛错、不产生 `unhandledrejection`。
+
+### US-45 容器级全屏时 `fullscreen` 快照正确同步
+
+- **目标**：无论全屏的是 `<video>` 还是容器，`PlayerState.fullscreen` 都要正确反映。
+- **配置**：默认。
+- **交互**：
+  1. 用 `requestFullscreen(player.root)` 进入容器全屏。
+  2. 读取 `player.getState().fullscreen`。
+  3. 退出全屏后再读。
+  4. （回归）接入方**不经过 SDK**、自行对容器调 `element.requestFullscreen()`。
+- **预期**：
+  1. 容器全屏时 `fullscreen === true`（**回归重点**：早先只判 `fullscreenElement === video`，容器全屏恒为 `false`，导致图标不切换、按钮退不出全屏）。
+  2. 退出后 `fullscreen === false`。
+  3. `<video>` 自身全屏时同样为 `true`。
+  4. iOS 原生视频全屏（`webkitDisplayingFullscreen`）同样为 `true`——它不派发 `fullscreenchange`、也不体现在 `document.fullscreenElement`。
+  5. 接入方自行对容器全屏（绕过 SDK）也能被感知，**因此业务不必再自己维护一份全屏状态**。
+  6. 默认 UI 的全屏按钮：点一次进入、再点一次退出（不会出现"被困在全屏"）。
 
 ---
 

@@ -219,7 +219,19 @@ export interface PlayerCommands {
    */
   switchQuality(id: number): Promise<void>
   switchURL(url: string): Promise<void>
-  requestFullscreen(): void
+  /**
+   * 请求全屏（TODO-9）。
+   *
+   * @param target 期望全屏的元素。缺省 = `<video>`（历史行为，兼容不变）。
+   *
+   * 传容器元素（如 `player.root`，或业务自己的外层容器）做**容器级全屏** ——
+   * 自绘控件与默认 UI 控件栏都挂在容器内，容器全屏后仍可见可点；
+   * 只全屏 `<video>` 会让它们消失（`<video>` 不能有子元素，兄弟节点不在全屏范围内）。
+   *
+   * iOS Safari 不支持普通元素全屏时自动回退原生视频全屏；无全屏能力的环境静默降级。
+   * 两种目标下 `PlayerState.fullscreen` 都会正确同步。
+   */
+  requestFullscreen(target?: Element): void
   /** 退出全屏（与 `requestFullscreen` 配对；iOS 原生视频全屏亦可退出） */
   exitFullscreen(): void
   /**
@@ -297,9 +309,15 @@ export interface PlayerState {
    */
   duration: number
   /**
-   * 是否处于全屏。兼容标准 Fullscreen API 与 iOS 原生视频全屏
-   * （后者不体现在 `document.fullscreenElement`）。
+   * 是否处于全屏。覆盖三种来源：
+   * - 标准 Fullscreen API（`document.fullscreenElement`）；
+   * - **容器级全屏**：全屏的是 `<video>` 的祖先（业务的容器 / SDK 的 `root`）；
+   * - iOS 原生视频全屏（`webkitDisplayingFullscreen`，不出现在 `fullscreenElement` 里）。
+   *
    * 用途：切换「进入/退出全屏」按钮形态，或在全屏变化时调整自绘控件布局。
+   *
+   * 注意：接入方若把更外层（如整个应用外壳）全屏，本字段也会为 `true`——此时视频确实占满屏幕，
+   * 认定为全屏并允许一键退出，符合用户预期。
    */
   fullscreen: boolean
   /** 当前倍速（真实生效值，经浏览器钳制后读回）。默认 `1`。 */

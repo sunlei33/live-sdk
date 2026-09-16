@@ -111,7 +111,9 @@ async function exerciseCommands(): Promise<void> {
   player.setVolume(0.5)
   player.switchQuality(1) // 入参 = Quality.id
   await player.switchURL('https://backup.m3u8') // 运行中切流
-  player.requestFullscreen()
+  player.requestFullscreen() // 缺省 = 全屏 <video>（历史行为）
+  player.requestFullscreen(player.root) // TODO-9：传目标元素 = 容器级全屏（自绘控件仍可见）
+  player.requestFullscreen(document.querySelector('#stage') as Element) // 也可传业务自己的容器
   player.exitFullscreen() // 与 requestFullscreen 配对（全屏态下可退出）
   player.seek(120) // 仅有限时长（点播/重播）生效；直播无限流为 noop
   player.setPlaybackRate(1.5) // 写后读回，快照反映实际生效值
