@@ -311,6 +311,10 @@ player.on('error', (e) => {
 
 同样的快照也会随 `retry` 事件载荷（`e.diagnostic`）与上报插件收到的 `ReportRecord.data.diagnostic` 一起下发——接自定义 `ReporterPlugin` 即可直接转发到埋点/日志系统。
 
+> **两条通道信息对等**：事件通道给 `err.code` / `err.domain` / `err.fatal` / `err.diagnostic`，上报通道给
+> `record.code` / `record.data.domain` / `record.level` / `record.data.diagnostic` —— 走哪条都能拿到同样的信息。
+> 唯一要紧的是**别同时开两条**（同一错误会各上报一次，见下方「不要注册 ReporterPlugin 收错误」的说明）。
+
 #### 错误域（`err.domain`）：按「该去哪儿排查」分流
 
 错误码是**枚举**（13 个，还会随版本增加），而看板只关心粗粒度的**归因方向**。`PlayerError.domain`
@@ -908,6 +912,8 @@ player.on('error', (e) => {
 ```
 
 The same snapshot is also delivered with the `retry` event payload (`e.diagnostic`) and to reporting plugins as `ReportRecord.data.diagnostic` — wire up a custom `ReporterPlugin` and forward it straight to your analytics/logging system.
+
+> **The two channels carry equivalent information**: the event channel gives `err.code` / `err.domain` / `err.fatal` / `err.diagnostic`; the reporting channel gives `record.code` / `record.data.domain` / `record.level` / `record.data.diagnostic`. Whichever you pick, you get the same facts. The only thing to avoid is **using both at once** (each error would then be reported twice — see the note on not registering a ReporterPlugin to collect errors).
 
 #### Error domain (`err.domain`): triage by "where to look"
 

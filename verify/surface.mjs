@@ -42,11 +42,24 @@
  *
  * ── 自测记录（2026-09-16）──
  *
- * - 往清单里登记一个无消费者的名字（`__selfTestDeadProbe`）→ 正确报 `SUSPECT` 并以退出码 1 失败；
- *   撤回后恢复全绿。
- * - 反向验证过判据的关键细节：早先按「文件名以 index.ts 结尾」判定 barrel，
- *   把装着 `UIMount` 实现的 `src/ui/index.ts` 一并排除，导致 `onDestroy`（真实有调用）被误报为死代码。
- *   现改为按内容判定「纯再导出」。
+ * 正向：往清单里登记一个无消费者的名字（`__selfTestDeadProbe`）→ 正确报 `SUSPECT` 并退出码 1；
+ * 撤回后恢复全绿。
+ *
+ * 反向：判据本身出过 4 个假结论，都是**靠核对实现细节**发现的，已全部修正（教训比结论值钱）：
+ *
+ * 1. 按「文件名以 index.ts 结尾」判定 barrel —— 把装着 `UIMount` 实现的 `src/ui/index.ts`
+ *    一并排除，导致 `onDestroy`（实际有调用）被误报为死代码。
+ * 2. 反过来，`src/index.ts` 含 `createPlayer` 的真实实现，**不是**纯 barrel，
+ *    于是它的 `export { X } from '...'` 让**每个**顶层导出白得 1~3 分 ——
+ *    顶层导出整体失去判据（`SentryReporter` 因此白得 3 分）。改为按**语句**排除再导出。
+ * 3. 统计未剔注释 —— `SentryReporter` 在 src 里只出现在 JSDoc 示例中，
+ *    一处文档提及就算成了「有消费者」，等于让注释给死代码续命。
+ * 4. 未扫描 `.html` —— `test/e2e/harness.html` 是 `getKernel()` 的真实消费者，
+ *    漏掉它会把 `getKernel` 误判为死代码。
+ *
+ * 四条修正后，本脚本才第一次真正绿：119 个名字、0 可疑、2 条豁免（`UIMount` / `setLogLevel`，
+ * 各自写明了理由）。**这四条也说明：一个普查脚本的可信度取决于它对「什么算使用」的定义，
+ * 而不是它能跑通。**
  *
  * 退出码非 0 即失败（已接入 `npm run verify`）。
  */
@@ -62,15 +75,16 @@ const ROOT = resolve(HERE, '..')
  * 确属「仅供接入方使用、SDK 内部不调用、也暂无测试」的公开项。
  * **登记即承诺这项 API 是有意对外的**，因此每条都要写清「谁在用、为什么内部不用」。
  *
- * 当前为**空**：收紧判据（去掉声明处与 barrel、类方法改按成员访问统计）之后，
- * 119 个公开名字全部有消费者或覆盖，无需豁免。
- * 空表本身就是好消息 —— 说明没有「靠豁免兜着的幽灵 API」。
+ * 当前 2 条（同名项在多个分组出现时只登记一次）。空表不是目标 —— 目标是没有
+ * 「说不清为什么存在」的导出。每条豁免都应当能回答「如果删了谁会受影响」。
  *
  * 登记格式：
  *   name: '理由（谁在用 / 为什么 SDK 内部不调用它）',
  */
 const INTENTIONAL_PUBLIC_API = {
-  // 例：someExport: '接入方在自定义 XXX 时使用；SDK 内部走 YYY，不需要它',
+  UIMount:
+    '默认 UI 的挂载器类（ui 包）：接入方需要精细控制 UI 装配顺序/复用实例时用它；SDK 内部只用便捷包装 mountDefaultUI，故无内部消费者',
+  setLogLevel: '运行时调整日志级别的开关，纯接入方使用；SDK 内部不自我调级（级别由接入方决定）',
 }
 
 const FILES = { src: [], test: [], verify: [] }
@@ -81,7 +95,9 @@ for (const group of Object.keys(FILES)) {
       if (n === 'node_modules') continue
       const p = join(d, n)
       if (statSync(p).isDirectory()) walk(p)
-      else if (/\.(ts|mjs|js)$/.test(n) && !n.endsWith('.d.ts')) FILES[group].push(p)
+      // `.html` 必须算上：E2E 的 `test/e2e/harness.html` 是 `getKernel()` 的真实消费者，
+      // 漏掉它会把 getKernel 误判为死代码（实测踩过）。
+      else if (/\.(ts|mjs|js|html)$/.test(n) && !n.endsWith('.d.ts')) FILES[group].push(p)
     }
   }
   walk(dir)
@@ -93,7 +109,38 @@ FILES.verify = FILES.verify.filter((f) => !EXCLUDE_IN_VERIFY.has(f))
 
 const contents = new Map()
 for (const list of Object.values(FILES)) {
-  for (const f of list) if (!contents.has(f)) contents.set(f, readFileSync(f, 'utf8'))
+  for (const f of list) if (!contents.has(f)) contents.set(f, stripToUsage(readFileSync(f, 'utf8')))
+}
+
+/**
+ * 把源码裁成「只保留真实使用处」，再做统计。三步缺一不可：
+ *
+ * 1. **剔除注释** —— `SentryReporter` 在 `src/` 里只出现在 JSDoc 示例中
+ *    （`registerPlugin(SentryReporter, { sentry })`）。不剔注释，一处**文档提及**
+ *    就会被算成「有消费者」，等于让注释给死代码续命。
+ * 2. **剔除再导出语句** —— `src/index.ts` 里有 `createPlayer` 的真实实现，
+ *    因此它**不是**纯 barrel（不能用「纯 barrel」规则整文件排除）；但它的
+ *    `export { X } from '...'` 会把**每一个**被 barreled 的名字都算成一个消费者，
+ *    让顶层导出的判据整体失效（实测：`SentryReporter` 因此白得 3 分）。
+ *    故按**语句**而非文件来排除。
+ * 3. 声明处仍由 `declaringFiles()` 单独排除。
+ *
+ * 剩下的才算「有人真的用了它」。
+ */
+function stripToUsage(text) {
+  return (
+    text
+      // 块注释（含 JSDoc）
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // 行注释（`(^|[^:])` 避开 `https://` 这类）
+      .replace(/(^|[^:])\/\/.*$/gm, '$1')
+      // `export { A, B } from './x'`（含多行展开）
+      .replace(/export\s+(?:type\s+)?\{[^}]*\}\s*from\s*['"][^'"]*['"]/g, '')
+      // `export * from './x'` / `export * as ns from './x'`
+      .replace(/export\s+\*[\s\S]*?from\s*['"][^'"]*['"]/g, '')
+      // 裸再导出列表 `export { A, B }`（源已在别处 import）
+      .replace(/export\s+\{[^}]*\}/g, '')
+  )
 }
 
 /**

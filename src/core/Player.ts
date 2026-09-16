@@ -1350,7 +1350,10 @@ export class Player {
       type: 'error',
       code: out.code,
       level: out.fatal ? 'fatal' : 'warn',
-      data: { message: out.message, retryCount: out.retryCount, diagnostic },
+      // `domain` 必须一并带上：上报通道与事件通道**信息应对等**。
+      // 只给事件通道加 domain（err.domain），会让走上报通道的接入方（如接 SentryReporter）
+      // 又得自己按 code 映射一遍 —— 那正是 0.5.0 加错误域要消掉的事。
+      data: { message: out.message, domain: out.domain, retryCount: out.retryCount, diagnostic },
       time: Date.now(),
     })
     if (out.fatal) {
@@ -1384,7 +1387,11 @@ export class Player {
     const diagnostic = this.buildDiagnostic(code, delay)
     logger.warn('[live-sdk] 触发重连', diagnostic)
     this.emit(Events.RETRY, { code, retryCount: this.retryCount, delay, diagnostic })
-    this.dispatchReport({ type: 'event', code: 'retry', level: 'warn', data: { message, ...diagnostic }, time: Date.now() })
+    // 诊断快照**嵌套在 `diagnostic` 下**，与 error 记录保持同一形状 ——
+    // 早先这里是 `{ message, ...diagnostic }`（平铺），导致同一条文档承诺
+    // 「`ReportRecord.data.diagnostic` 含快照」在重连路径上不成立：
+    // 消费方按 `data.diagnostic` 取会拿到 undefined，只能靠推断去读一堆平铺字段。
+    this.dispatchReport({ type: 'event', code: 'retry', level: 'warn', data: { message, diagnostic }, time: Date.now() })
     this.stateMachine.transition('retry')
     const timer = window.setTimeout(() => this.reload(code, diagnostic), delay)
     this.addTimer(timer)
