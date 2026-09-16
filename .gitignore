@@ -11,6 +11,10 @@ test-results/
 playwright-report/
 coverage/
 
-# 内部调研/方案文档：只作为本地决策记录，不随仓库与 npm 包分发
+# 文档目录采用「白名单」：**只对外提交两份** —— 验收用例与对比分析。
+# 其余 md（实现说明 implementation.md、调研/方案 proposal-*.md 等）是本地决策记录，
+# 只留在工作区，不随仓库与 npm 包分发。
 # （npm 侧另由 package.json 的 files 白名单限制为 dist，二者互为兜底）
-docs/proposal-*.md
+docs/*
+!docs/user-stories.md
+!docs/vs-xgplayer.md
