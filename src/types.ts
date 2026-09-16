@@ -2,9 +2,9 @@
  * live-sdk 全部共享类型定义。
  * 与 docs/live-sdk-spec.md 的 API 面逐字对齐，是「内核 / 插件 / 接入方」三方契约的唯一来源。
  */
-// `SessionState` 的声明在 constants.ts（状态机与常量同处一地），此处仅做类型引用。
-// 纯类型导入在编译期被完全擦除，不会与 constants.ts 形成运行时循环依赖。
-import type { SessionState } from './constants'
+// `SessionState` / `ErrorDomain` / `CommandName` 的声明在 constants.ts（与常量同处一地），
+// 此处仅做类型引用。纯类型导入在编译期被完全擦除，不会与 constants.ts 形成运行时循环依赖。
+import type { CommandName, ErrorDomain, SessionState } from './constants'
 
 // ───────────────────────────── 观测档位 ─────────────────────────────
 
@@ -204,7 +204,6 @@ export type PlayInput = string | PlayConfig | PlayConfigProvider
 export type PosterMode = 'native' | 'overlay'
 
 // ───────────────────────────── 三契约（命令 / 状态 / 事件） ─────────────────────────────
-
 export interface PlayerCommands {
   play(config?: PlayInput): Promise<void>
   pause(): void
@@ -445,10 +444,51 @@ export type AppStateKey = `app.${string}`
 
 export interface PlayerError {
   code: string // ERROR_CODE
+  /**
+   * 错误域：`network` | `decode` | `config` | `unknown`（见 `ERROR_DOMAIN`）。
+   *
+   * 它是 `code` 的**归因方向**收敛层，供接入方直接做错误分流与看板分类，
+   * 免去自己维护「错误码 → 方向」映射表（该表会随 `ERROR_CODE` 新增而失同步）。
+   * 取值恒存在；未知码为 `unknown`（**不会**被猜成某个具体域）。
+   */
+  domain: ErrorDomain
   fatal: boolean // true=SDK 尽力后仍不可用，需接入方介入；false=自动重连中，可忽略
   message: string
   retryCount: number // 已重试次数
   diagnostic?: RetryDiagnostic // 触发本次重试时的地址 + 网络环境快照（便于排查）
+}
+
+/**
+ * `COMMAND` 事件载荷：**全部 12 个命令**的统一观测出口（`PlayerCommands` 的每个方法都有）。
+ *
+ * 为什么需要它：命令是「用户意图」的唯一入口，但每个命令各派发各自的语义事件
+ * （`play` / `pause` / `quality_change` …），接入方想统计「用户点了什么」得逐个订阅、
+ * 逐个兜底。实测某业务为此手写了 12 组订阅 + 手动 `report()`。
+ *
+ * 本事件把「命令被调用」这件事归一：一次订阅即可拿到全部交互，
+ * 并按 `phase` 分辨「调用前」与「调用后」、按 `applied` 分辨「真的生效了没有」。
+ *
+ * ```js
+ * player.on('command', ({ name, phase, applied }) => {
+ *   if (phase === 'after' && applied === false) console.warn(`${name} 未生效（no-op）`)
+ * })
+ * ```
+ */
+export interface CommandEventPayload {
+  /** 命令名，与 `PlayerCommands` 的键一一对应（12 个，见 `COMMAND_NAMES`） */
+  name: CommandName
+  /** `'before'`（进入命令实现前）/ `'after'`（命令返回后）；每个命令**成对派发** */
+  phase: HookPhase
+  /**
+   * 仅 `'after'` 阶段有值：该命令是否**真的生效**。
+   * `false` = 判定为 no-op —— 如 `seek` 在直播无限流下、`switchQuality` 传入的档位不存在、
+   * 内核不支持该能力（`setLiveLatency` / `switchQuality`）、命令在已销毁实例上被调用等。
+   *
+   * ⚠️ `'before'` 阶段拿不到它（此时还不知道结果），不要用它做「是否已生效」的分支。
+   */
+  applied?: boolean
+  /** 派发时刻（`Date.now()`） */
+  time: number
 }
 
 /**

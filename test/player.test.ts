@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { installDom, makeEl, type FakeMediaElement } from './fixtures/dom'
-import { ERROR_CODE } from '../src/constants'
+import { ERROR_CODE, COMMAND_NAMES, ERROR_DOMAIN } from '../src/constants'
 
 type Dom = ReturnType<typeof installDom>
 type PlayerInstance = import('../src/core/Player').Player
@@ -589,5 +589,178 @@ describe('重连路径的异步失败处理', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('COMMAND 事件（统一命令观测）', () => {
+  type Seen = { name: string; phase: string; applied?: boolean }
+
+  /** 依次调用全部 12 个命令，收集 COMMAND 事件 */
+  async function runAllTwelve(p: PlayerInstance): Promise<Seen[]> {
+    const seen: Seen[] = []
+    p.on('command', (e) => seen.push(e as Seen))
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    p.pause()
+    p.mute(true)
+    p.setVolume(0.5)
+    await p.switchQuality(1)
+    await p.switchURL('https://cdn/b.m3u8')
+    p.requestFullscreen()
+    p.exitFullscreen()
+    p.seek(10)
+    p.setPlaybackRate(1.5)
+    p.setPoster('https://img/c.jpg')
+    p.setLiveLatency(3, 8)
+    return seen
+  }
+
+  it('12 个命令全覆盖，且每个命令 before/after 严格成对', async () => {
+    const p = createPlayer()
+    const seen = await runAllTwelve(p)
+
+    const names = new Set(seen.map((e) => e.name))
+    expect(names.size).toBe(COMMAND_NAMES.length) // 12
+    for (const n of COMMAND_NAMES) expect(names.has(n), `命令 ${n} 未派发 COMMAND`).toBe(true)
+
+    for (const n of COMMAND_NAMES) {
+      const evts = seen.filter((e) => e.name === n)
+      expect(
+        evts.map((e) => e.phase),
+        `命令 ${n} 的 before/after 不成对`,
+      ).toEqual(['before', 'after'])
+    }
+    p.destroy()
+  })
+
+  it('applied 只在 after 阶段出现（before 时结果未知）', async () => {
+    const p = createPlayer()
+    const seen = await runAllTwelve(p)
+    for (const e of seen) {
+      if (e.phase === 'before') expect(e.applied).toBeUndefined()
+      else expect(typeof e.applied, `命令 ${e.name} 的 after 缺 applied`).toBe('boolean')
+    }
+    p.destroy()
+  })
+
+  it('applied 反映真实语义：seek 在直播无限流下 false、有限时长下 true', async () => {
+    const p = createPlayer()
+    const seen: Seen[] = []
+    p.on('command', (e) => seen.push(e as Seen))
+
+    // 直播（无限流）→ noop
+    video.duration = Infinity
+    video._fire('durationchange')
+    p.seek(30)
+    expect(seen.at(-1)).toMatchObject({ name: 'seek', phase: 'after', applied: false })
+
+    // 点播 / 重播（有限时长）→ 生效
+    video.duration = 120
+    video.currentTime = 0
+    p.seek(30)
+    expect(seen.at(-1)).toMatchObject({ name: 'seek', phase: 'after', applied: true })
+    expect(video.currentTime).toBe(30)
+    p.destroy()
+  })
+
+  it('applied：switchQuality 传入档位表里没有的 id → false', async () => {
+    const p = createPlayer()
+    const seen: Seen[] = []
+    p.on('command', (e) => seen.push(e as Seen))
+    await p.switchQuality(999) // qualityMap 无此 id
+    expect(seen.at(-1)).toMatchObject({ name: 'switchQuality', phase: 'after', applied: false })
+    p.destroy()
+  })
+
+  it('【关键】被钩子拦截的命令仍派发 after，且 applied=false（而非静默不派发）', async () => {
+    const p = createPlayer()
+    const seen: Seen[] = []
+    p.on('command', (e) => seen.push(e as Seen))
+    p.useHooks('play', (ctx) => {
+      const c = ctx as { phase: string; cancelled: boolean }
+      if (c.phase === 'before') c.cancelled = true
+    })
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    const playEvents = seen.filter((e) => e.name === 'play')
+    expect(playEvents.map((e) => e.phase)).toEqual(['before', 'after'])
+    expect(playEvents[1].applied).toBe(false)
+    p.destroy()
+  })
+
+  it('error 事件带 domain（错误域收敛层，接入方不必自建映射表）', async () => {
+    const p = createPlayer()
+    const got: Array<{ code: string; domain: string }> = []
+    p.on('error', (e) => got.push(e as { code: string; domain: string }))
+    // 原生 media error code=3（解码失败）→ media_decode_error / decode
+    ;(video as unknown as { error: unknown }).error = { code: 3, message: 'decode failed' }
+    video._fire('error')
+    expect(got.at(-1)).toMatchObject({ code: ERROR_CODE.MEDIA_DECODE_ERROR, domain: ERROR_DOMAIN.DECODE })
+    p.destroy()
+  })
+})
+
+describe('容器零尺寸告警', () => {
+  function captureWarns(): { warns: string[]; restore: () => void } {
+    const warns: string[] = []
+    const orig = console.warn
+    console.warn = (...a: unknown[]) => warns.push(a.map(String).join(' '))
+    return { warns, restore: () => (console.warn = orig) }
+  }
+  /** 让 root 报告指定尺寸（fixture 默认没有测量能力，见下一条用例） */
+  function stubSize(p: PlayerInstance, width: number, height: number): void {
+    ;(p.root as unknown as { getBoundingClientRect: () => { width: number; height: number } }).getBoundingClientRect =
+      () => ({ width, height })
+  }
+  const hit = (warns: string[]) => warns.filter((w) => w.includes('容器尺寸为 0')).length
+
+  it('零尺寸 → 起播时告警一次，重复起播不重复告警', async () => {
+    const p = createPlayer()
+    stubSize(p, 0, 0)
+    const cap = captureWarns()
+    try {
+      await p.play({ url: 'https://cdn/a.m3u8' })
+      await p.play({ url: 'https://cdn/b.m3u8' })
+    } finally {
+      cap.restore()
+    }
+    expect(hit(cap.warns)).toBe(1)
+    p.destroy()
+  })
+
+  it('仅有宽度、高度为 0（父级无高度的经典场景）→ 告警', async () => {
+    const p = createPlayer()
+    stubSize(p, 640, 0)
+    const cap = captureWarns()
+    try {
+      await p.play({ url: 'https://cdn/a.m3u8' })
+    } finally {
+      cap.restore()
+    }
+    expect(hit(cap.warns)).toBe(1)
+    p.destroy()
+  })
+
+  it('尺寸正常 → 不告警', async () => {
+    const p = createPlayer()
+    stubSize(p, 640, 360)
+    const cap = captureWarns()
+    try {
+      await p.play({ url: 'https://cdn/a.m3u8' })
+    } finally {
+      cap.restore()
+    }
+    expect(hit(cap.warns)).toBe(0)
+    p.destroy()
+  })
+
+  it('【关键】环境测不到尺寸（DOM 替身 / 非浏览器）→ 不告警，不把「测不到」当 0', async () => {
+    const p = createPlayer() // fixture 的 root 无 getBoundingClientRect / offsetWidth
+    const cap = captureWarns()
+    try {
+      await p.play({ url: 'https://cdn/a.m3u8' })
+    } finally {
+      cap.restore()
+    }
+    expect(hit(cap.warns)).toBe(0)
+    p.destroy()
   })
 })

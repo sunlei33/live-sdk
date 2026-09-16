@@ -208,6 +208,17 @@ player.on('features_updated', (report) => {
 | `env` | `EnvAdapter` | `WebEnvAdapter` | 宿主环境适配 |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | 封面图呈现方式；MSE 路径建议 `'overlay'` |
 
+> **接入排查：容器零尺寸告警**。「接入后画面不显示」最常见的原因是**容器没有高度**——
+> `height: 100%` 的元素在父级无确定高度时实际为 0，此时 SDK 一切正常（`play()` 成功、无 error），
+> 但一个像素都看不见。`play()` 时会检查并在宽或高为 0 时**告警一次**：
+>
+> ```
+> 容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。
+> ```
+>
+> 只在 `play()` 时检查（不在构造时）：构造时容器合法为 0 的场景很常见（未激活的 tab、路由过渡、懒挂载），
+> 那时告警误报率过高。环境测不到尺寸时（非浏览器）不会误报。
+
 ### 命令
 
 | 方法 | 返回 | 说明 |
@@ -300,6 +311,32 @@ player.on('error', (e) => {
 
 同样的快照也会随 `retry` 事件载荷（`e.diagnostic`）与上报插件收到的 `ReportRecord.data.diagnostic` 一起下发——接自定义 `ReporterPlugin` 即可直接转发到埋点/日志系统。
 
+#### 错误域（`err.domain`）：按「该去哪儿排查」分流
+
+错误码是**枚举**（13 个，还会随版本增加），而看板只关心粗粒度的**归因方向**。`PlayerError.domain`
+直接给出，也可对任意 code 调 `errorDomainOf(code)`：
+
+| 域 | 归因方向（该去哪儿排查） |
+|---|---|
+| `network` | **服务端 / CDN / 链路** —— `manifest_load_error` `manifest_404` `frag_load_error` `network_error` `load_timeout` `retry_exhausted` |
+| `decode` | **内容 / 转码 / 内核** —— `media_decode_error` `media_src_not_supported` `drm_no_license` |
+| `config` | **接入侧配置 / 平台能力** —— `config_resolve_failed` `no_supported_kernel` `play_failed` |
+| `unknown` | **未归类** —— 映射表未覆盖，如实暴露而不是猜 |
+
+```js
+player.on('error', (e) => {
+  if (e.domain === 'network') reportCdnIssue(e)
+  else if (e.domain === 'decode') reportTranscodeIssue(e)
+  else if (e.domain === 'config') reportIntegrationIssue(e)
+})
+```
+
+> 有了这一层，接入方**不必自建「错误码 → 方向」映射表**——那张表会随 SDK 新增错误码而失同步。
+>
+> `unknown` 刻意独立成一档：别把它并进 `decode`（"播放器自己的问题"）。那样会让**真实的未知故障被伪装成解码问题**，排查方向跑偏。
+>
+> SDK 侧有一道契约测试遍历全量 `ERROR_CODE`，未登记域即失败——所以你不会收到「本该有域却是 unknown」的错误码。
+
 ### 事件
 
 `Events` 枚举成员（值即对应 snake_case 字符串，`player.on(Events.FIRST_FRAME, cb)` 与 `player.on('first_frame', cb)` 等价）：
@@ -307,7 +344,7 @@ player.on('error', (e) => {
 ```ts
 LOAD_START  MANIFEST_PARSED  FIRST_FRAME  PLAY  PAUSE  PLAYING  STALLED  RECOVERED
 RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
-VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
+VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT  COMMAND
 ```
 
 插件还会派发两个**独立事件名**（刻意不进 `Events` 枚举 —— 它们属于 `preset: 'live'` 的可选旁路能力，不是播放内核契约的一部分；不接对应配置的接入方永远收不到）：
@@ -316,6 +353,34 @@ VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
 'live_status'              // LivePolling：直播状态发生变化
 LIVE_STATUS_ERROR_EVENT    // 'live_status_error'：LivePolling 轮询失败
 ```
+
+#### `COMMAND`：统一命令观测（12 个命令全覆盖）
+
+语义事件（`play` / `quality_change` / …）是为**驱动 UI** 设计的，各自载荷不同；而「用户点了什么、有没有生效」
+是**观测**问题。`COMMAND` 把这件事归一 —— 一次订阅覆盖全部 12 个命令，不必逐命令订阅再兜底。
+
+```js
+player.on('command', ({ name, phase, applied, time }) => {
+  // phase: 'before' | 'after'（每个命令成对派发）；applied 仅 after 有值
+  if (phase === 'after' && applied === false) console.warn(`${name} 未生效（no-op）`)
+})
+```
+
+`applied === false` 的典型场景（**都是「命令返回了但没起作用」，不是错误**）：
+
+| 命令 | no-op 条件 |
+|---|---|
+| `seek` | 直播无限流（`duration === Infinity`）下不生效；实例已销毁 |
+| `switchQuality` | 内核无 `qualitySwitch` 能力；`id` 不在档位表；被 before 钩子拦截 |
+| `switchURL` | 内核未初始化；切流失败；被 before 钩子拦截 |
+| `setLiveLatency` | 内核未实现 `setLiveLatency`（如 `NativeKernel`） |
+| `play` | 实例已销毁；被 before 钩子拦截；被更新的 `play()` 取代；起播/恢复失败 |
+
+> `play({ autoplay: false })` 的 `applied` 为 `true` —— 它完成了被要求的事（加载但不自动播），不是空转。
+>
+> ⚠️ `setVolume` 在滑块拖动时可能高频派发（range 的 `input` 事件连续触发），统计交互时请自行节流。
+>
+> 命令名可在运行时枚举：`COMMAND_NAMES`（12 个，与 `PlayerCommands` 的键一一对应）。
 
 #### `PLAY` 与 `PLAYING` 的区别
 
@@ -494,7 +559,7 @@ createPlayer({ container: '#player', preset: [MyReporter] })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 47 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 50 条用例，格式：目标 / 配置 / 交互 / 预期
 - [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
@@ -735,6 +800,14 @@ player.on('features_updated', (report) => {
 | `env` | `EnvAdapter` | `WebEnvAdapter` | Host-environment adapter |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | How the poster is rendered; `'overlay'` recommended on the MSE path |
 
+> **Integration triage: zero-size container warning.** The most common reason "nothing shows up after integrating" is a **container with no height** — a `height: 100%` element resolves to 0 when its parent has no definite height. The SDK is perfectly healthy at that point (`play()` succeeds, no error event), yet not a single pixel is visible. `play()` checks for this and warns **once** when either dimension is 0:
+>
+> ```
+> 容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。
+> ```
+>
+> It only checks on `play()` (not at construction): a container legitimately being 0 at construction is common (inactive tab, route transition, lazy mount), where warning would be too noisy. When the environment cannot measure size (non-browser), it does not misreport.
+
 ### Commands
 
 | Method | Returns | Description |
@@ -827,6 +900,31 @@ player.on('error', (e) => {
 
 The same snapshot is also delivered with the `retry` event payload (`e.diagnostic`) and to reporting plugins as `ReportRecord.data.diagnostic` — wire up a custom `ReporterPlugin` and forward it straight to your analytics/logging system.
 
+#### Error domain (`err.domain`): triage by "where to look"
+
+Error codes are an **enum** (13 values and growing), while a dashboard only cares about the coarse **attribution direction**. `PlayerError.domain` provides it directly; for any raw code string call `errorDomainOf(code)`:
+
+| Domain | Where to look | Codes |
+|---|---|---|
+| `network` | **server / CDN / transport** | `manifest_load_error` `manifest_404` `frag_load_error` `network_error` `load_timeout` `retry_exhausted` |
+| `decode` | **content / transcode / kernel** | `media_decode_error` `media_src_not_supported` `drm_no_license` |
+| `config` | **integration config / platform capability** | `config_resolve_failed` `no_supported_kernel` `play_failed` |
+| `unknown` | **unclassified** — reported honestly rather than guessed | — |
+
+```js
+player.on('error', (e) => {
+  if (e.domain === 'network') reportCdnIssue(e)
+  else if (e.domain === 'decode') reportTranscodeIssue(e)
+  else if (e.domain === 'config') reportIntegrationIssue(e)
+})
+```
+
+> With this layer, integrations **no longer maintain their own "code → direction" table** — such a table inevitably falls out of sync as the SDK adds error codes.
+>
+> `unknown` is deliberately its own bucket: do not fold it into `decode` ("the player's own problem"). That would disguise genuine unknown failures as decode issues and send triage in the wrong direction.
+>
+> A contract test walks the full `ERROR_CODE` set and fails if any code is unregistered — so you will never receive an error that should have a domain but reports `unknown`.
+
 ### Events
 
 `Events` enum members (values are the corresponding snake_case strings, so `player.on(Events.FIRST_FRAME, cb)` is equivalent to `player.on('first_frame', cb)`):
@@ -834,7 +932,7 @@ The same snapshot is also delivered with the `retry` event payload (`e.diagnosti
 ```ts
 LOAD_START  MANIFEST_PARSED  FIRST_FRAME  PLAY  PAUSE  PLAYING  STALLED  RECOVERED
 RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
-VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
+VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT  COMMAND
 ```
 
 Plugins additionally dispatch two **standalone event names** (deliberately kept out of the `Events` enum — they belong to the optional side-channel provided by `preset: 'live'`, not to the playback kernel contract; integrations that never configure them will never receive them):
@@ -843,6 +941,33 @@ Plugins additionally dispatch two **standalone event names** (deliberately kept 
 'live_status'              // LivePolling: live status changed
 LIVE_STATUS_ERROR_EVENT    // 'live_status_error': LivePolling request failed
 ```
+
+#### `COMMAND`: unified command observability (all 12 commands)
+
+Semantic events (`play` / `quality_change` / …) exist to **drive UI** and each carries a different payload. "What the user did, and whether it took effect" is an **observability** question. `COMMAND` unifies it — one subscription covers all 12 commands instead of per-command subscriptions plus fallbacks.
+
+```js
+player.on('command', ({ name, phase, applied, time }) => {
+  // phase: 'before' | 'after' (every command dispatches both); applied only exists on 'after'
+  if (phase === 'after' && applied === false) console.warn(`${name} was a no-op`)
+})
+```
+
+Typical `applied === false` cases (**"the command returned but had no effect", not an error**):
+
+| Command | No-op condition |
+|---|---|
+| `seek` | on an infinite live stream (`duration === Infinity`); destroyed instance |
+| `switchQuality` | kernel lacks `qualitySwitch`; `id` not in the quality table; intercepted by a before hook |
+| `switchURL` | kernel not initialised; switch failed; intercepted by a before hook |
+| `setLiveLatency` | kernel doesn't implement `setLiveLatency` (e.g. `NativeKernel`) |
+| `play` | destroyed instance; intercepted by a before hook; superseded by a newer `play()`; start/resume failed |
+
+> `play({ autoplay: false })` reports `applied: true` — it did what it was asked (load, don't auto-play); it is not a no-op.
+>
+> ⚠️ `setVolume` can fire at high frequency while dragging a range slider (`input` fires continuously) — throttle it if you aggregate interactions.
+>
+> Command names are enumerable at runtime: `COMMAND_NAMES` (12, in one-to-one correspondence with the keys of `PlayerCommands`).
 
 #### `PLAY` vs `PLAYING`
 
@@ -1025,7 +1150,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 47 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 50 cases in the format: goal / config / interaction / expectation
 - [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development

@@ -1,4 +1,53 @@
-import { ERROR_CODE } from '../constants'
+import { ERROR_CODE, ERROR_DOMAIN, type ErrorDomain } from '../constants'
+
+/**
+ * 错误码 → 错误域（`ERROR_CODE` 到「该去哪儿排查」的收敛层，见 `ERROR_DOMAIN` 的说明）。
+ *
+ * 映射原则：**按「谁能修」划分**，而不是按「哪行代码报的」——
+ * - `network` → 服务端 / CDN / 链路侧可修；
+ * - `decode` → 内容 / 转码侧可修（含 DRM：加密是流的属性）；
+ * - `config` → 接入方自己可修（配置、平台能力、自动播放策略）。
+ *
+ * ⚠️ **新增 `ERROR_CODE` 时必须同步本表**，否则会落到 `unknown`。
+ * `test/errors.test.ts` 有一条断言遍历 `ERROR_CODE` 全量值，漏了会失败。
+ */
+const DOMAIN_BY_CODE: Record<string, ErrorDomain> = {
+  // —— 服务端 / CDN / 链路 ——
+  [ERROR_CODE.MANIFEST_LOAD_ERROR]: ERROR_DOMAIN.NETWORK,
+  [ERROR_CODE.MANIFEST_404]: ERROR_DOMAIN.NETWORK,
+  [ERROR_CODE.FRAG_LOAD_ERROR]: ERROR_DOMAIN.NETWORK,
+  [ERROR_CODE.NETWORK_ERROR]: ERROR_DOMAIN.NETWORK,
+  [ERROR_CODE.LOAD_TIMEOUT]: ERROR_DOMAIN.NETWORK,
+  // 重连只由「可恢复」错误触发，而可恢复的那几个（manifest/frag/network/timeout）
+  // 全是网络域；fatal 的 media_* 不会重试。故重试耗尽必然属网络域。
+  [ERROR_CODE.RETRY_EXHAUSTED]: ERROR_DOMAIN.NETWORK,
+
+  // —— 内容 / 转码 / 内核 ——
+  [ERROR_CODE.MEDIA_DECODE_ERROR]: ERROR_DOMAIN.DECODE,
+  [ERROR_CODE.MEDIA_SRC_NOT_SUPPORTED]: ERROR_DOMAIN.DECODE,
+  // DRM 归内容侧：加密是「这条流的属性」，拿不到 license 要回内容/服务端确认，
+  // 而不是去查接入配置。接入方若想按能力位前置拦截，应看 getFeatureStatus() 的 drm 项。
+  [ERROR_CODE.DRM_NO_LICENSE]: ERROR_DOMAIN.DECODE,
+
+  // —— 接入侧配置 / 平台能力 ——
+  [ERROR_CODE.CONFIG_RESOLVE_FAILED]: ERROR_DOMAIN.CONFIG,
+  // 无可用内核 = 当前平台能力与配置选路的结果，接入方需要改 kernel 配置或降级策略
+  [ERROR_CODE.NO_SUPPORTED_KERNEL]: ERROR_DOMAIN.CONFIG,
+  // play() 被拒（自动播放策略）：接入方要靠 muted / 用户手势解决，不是播放器故障
+  [ERROR_CODE.PLAY_FAILED]: ERROR_DOMAIN.CONFIG,
+}
+
+/**
+ * 求错误码所属的域。未知码返回 `ERROR_DOMAIN.UNKNOWN`（**不猜测、不并入其它域**）。
+ *
+ * 同步、纯函数、无依赖 —— 接入方可在上报管道里直接调用，替代自己维护的
+ * 「错误码白名单 Set + message 关键词兜底」那套逻辑。
+ */
+export function errorDomainOf(code: string | undefined | null): ErrorDomain {
+  if (!code) return ERROR_DOMAIN.UNKNOWN
+  return DOMAIN_BY_CODE[code] ?? ERROR_DOMAIN.UNKNOWN
+}
+
 
 /**
  * 内核错误 → SDK 错误码映射。

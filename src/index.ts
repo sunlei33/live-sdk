@@ -28,13 +28,16 @@ export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 
 // —— 常量 ——
-export { Events, ERROR_CODE, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from './constants'
-export type { SessionState } from './constants'
+export { Events, ERROR_CODE, ERROR_DOMAIN, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf, COMMAND_NAMES } from './constants'
+export type { SessionState, ErrorDomain, CommandName } from './constants'
 
 // —— 工具 ——
 export { deepMerge, resolveContainer } from './utils/config'
 export * as sniffer from './utils/sniffer'
 export { logger, setLogLevel } from './utils/logger'
+export { errorDomainOf } from './utils/errors'
+export { readElementSize, isZeroSized } from './utils/size'
+export type { ElementSize } from './utils/size'
 
 // —— 类型 ——
 export type {
@@ -68,6 +71,7 @@ export type {
   FeatureStatusReport,
   LiveStatusPayload,
   LiveStatusErrorPayload,
+  CommandEventPayload,
   AppStateKey,
   PlayerError,
   RetryDiagnostic,

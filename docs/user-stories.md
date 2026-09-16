@@ -636,6 +636,63 @@
 
 ---
 
+## 十四、错误域 / 命令观测 / 接入自检（0.5.0）
+
+### US-46 错误域：一次分流，不必自建错误码映射表
+
+- **目标**：接入方能按「该去哪儿排查」分流错误，而不必自己维护「错误码 → 方向」映射表（该表会随 SDK 新增错误码而失同步）。
+- **配置**：默认。
+- **交互**：
+  1. 订阅 `error`，读 `err.domain`。
+  2. 制造各类异常：主 playlist 404、分片失败、断网超时、解码失败、无可用内核、`play()` 被自动播放策略拦截。
+  3. 对任意错误码字符串调 `errorDomainOf(code)`。
+- **预期**：
+  1. `err.domain` 取值恒为 `'network'` / `'decode'` / `'config'` / `'unknown'` 之一，且**恒存在**。
+  2. network 域：`manifest_404` / `manifest_load_error` / `frag_load_error` / `network_error` / `load_timeout` / `retry_exhausted`。
+  3. decode 域：`media_decode_error` / `media_src_not_supported` / `drm_no_license`。
+  4. config 域：`config_resolve_failed` / `no_supported_kernel` / `play_failed`。
+  5. **未知码如实为 `unknown`，不被猜成 decode**（回归重点：业务侧旧实现是「不认识就保守归解码」，会把真实未知故障伪装成解码问题、排查方向跑偏）。
+  6. 出参**与 `ERROR_CODE` 全量对齐**：SDK 新增错误码若未登记域，SDK 自身测试即失败（接入方不会收到 `unknown`）。
+
+### US-47 统一命令观测（COMMAND 事件）
+
+- **目标**：一次订阅即可统计「用户做了什么操作、有没有生效」，替代逐命令订阅 + 手动上报。
+- **配置**：默认。
+- **交互**：
+  1. 订阅 `command` 事件。
+  2. 依次调用全部 12 个命令（`play` / `pause` / `mute` / `setVolume` / `switchQuality` / `switchURL` / `requestFullscreen` / `exitFullscreen` / `seek` / `setPlaybackRate` / `setPoster` / `setLiveLatency`）。
+  3. 用 `useHooks('play', ...)` 在 before 阶段把 `ctx.cancelled` 置 `true` 后调用 `play()`。
+  4. 在直播无限流（`duration === Infinity`）下调 `seek()`。
+- **预期**：
+  1. 12 个命令**全部**派发 `COMMAND`；`COMMAND_NAMES` 可在运行时枚举出这 12 个名字。
+  2. 每个命令的 `before` / `after` **严格成对**（顺序为先 before 后 after）。
+  3. `applied` **只出现在 `after` 阶段**且恒为 `boolean`；`before` 阶段为 `undefined`。
+  4. `seek` 在直播无限流下 `applied === false`；在有限时长（点播/重播）下 `applied === true` 且定位生效。
+  5. `switchQuality` 传入档位表里不存在的 id → `applied === false`。
+  6. **被 before 钩子拦截的命令仍派发 `after`，且 `applied === false`**（不是静默不派发）——接入方能区分「用户没点」与「点了但没生效」。
+  7. `play({ autoplay: false })` 的 `applied === true`（它完成了被要求的事：加载但不自动播），是否真的在播看 `PlayerState.playing`。
+  8. 载荷含 `time`（`Date.now()`）。
+  9. ⚠️ `setVolume` 在滑块拖动时可能高频派发，接入方统计交互时应自行节流。
+
+### US-48 容器零尺寸告警（接入排查加速）
+
+- **目标**：覆盖「接入后画面不显示」最常见的原因——容器没有高度。
+- **配置**：默认。
+- **交互**：
+  1. 容器样式为 `width:100%` 但父级无确定高度（`height` 实际为 0）→ 调 `play()`。
+  2. 容器尺寸正常（如 `640×360`）→ 调 `play()`。
+  3. 连续两次 `play()`。
+  4. 非浏览器环境 / DOM 替身（无 `getBoundingClientRect` 与 `offsetWidth`）→ 调 `play()`。
+- **预期**：
+  1. 零尺寸时控制台出现一条明确告警：`容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度…`。
+  2. **只告警一次**，重复 `play()` 不重复刷屏。
+  3. 尺寸正常时**不告警**。
+  4. **测不到尺寸时不告警**（关键：不能把「测不到」当成 0，否则测试与 SSR 场景满屏误报）。
+  5. 仅有宽度、高度为 0（父级无高度的经典场景）同样告警。
+  6. 告警**不阻断**播放流程（`play()` 照常返回、不抛错）。
+
+---
+
 ## 附录：验收环境建议
 | 项 | 建议 |
 |---|---|

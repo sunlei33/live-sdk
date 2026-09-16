@@ -686,5 +686,76 @@ check('destroy 后 root 已移除', true)
   pFs.destroy()
 }
 
+// ══════════ 25~27：错误域 / 命令观测 / 容器自检（0.5.0） ══════════
+
+// 25. 错误域：全部 ERROR_CODE 都必须有明确归属（新增码漏登记会在单测与这里同时暴露）
+{
+  const { ERROR_CODE: EC, ERROR_DOMAIN: ED, errorDomainOf } = sdk
+  const all = Object.values(EC)
+  const unregistered = all.filter((c) => c !== EC.UNKNOWN && errorDomainOf(c) === ED.UNKNOWN)
+  check(`ERROR_CODE 全量（${all.length} 个）都有错误域`, unregistered.length === 0)
+  check('错误域取值合法', all.every((c) => Object.values(ED).includes(errorDomainOf(c))))
+  check('network 域代表码正确', errorDomainOf(EC.MANIFEST_404) === ED.NETWORK)
+  check('decode 域代表码正确', errorDomainOf(EC.MEDIA_DECODE_ERROR) === ED.DECODE)
+  check('config 域代表码正确', errorDomainOf(EC.NO_SUPPORTED_KERNEL) === ED.CONFIG)
+  check('未知码如实标 unknown（不猜）', errorDomainOf('future_code') === ED.UNKNOWN)
+}
+
+// 26. 统一命令观测：12 个命令全覆盖 + before/after 成对 + applied 语义
+{
+  const pCmd = createPlayer({ container: '#playerCmd' })
+  const seen = []
+  pCmd.on(sdk.Events.COMMAND, (e) => seen.push(e))
+
+  await pCmd.play({ url: 'https://cdn/cmd.m3u8' })
+  pCmd.pause()
+  pCmd.mute(true)
+  pCmd.setVolume(0.5)
+  await pCmd.switchQuality(1)
+  await pCmd.switchURL('https://cdn/cmd2.m3u8')
+  pCmd.requestFullscreen()
+  pCmd.exitFullscreen()
+  pCmd.seek(10)
+  pCmd.setPlaybackRate(1.5)
+  pCmd.setPoster('https://img/c.jpg')
+  pCmd.setLiveLatency(3, 8)
+
+  const names = new Set(seen.map((e) => e.name))
+  check(`COMMAND 覆盖全部 ${sdk.COMMAND_NAMES.length} 个命令`, names.size === sdk.COMMAND_NAMES.length)
+  check('COMMAND 命令名与 COMMAND_NAMES 一致', sdk.COMMAND_NAMES.every((n) => names.has(n)))
+  const paired = sdk.COMMAND_NAMES.every((n) => {
+    const phases = seen.filter((e) => e.name === n).map((e) => e.phase)
+    return phases.length === 2 && phases[0] === 'before' && phases[1] === 'after'
+  })
+  check('每个命令 before/after 成对', paired)
+  check('applied 只出现在 after 阶段', seen.every((e) => (e.phase === 'before' ? e.applied === undefined : typeof e.applied === 'boolean')))
+  // 直播（无限流）下 seek 为 noop → 如实回报 applied=false
+  const seekAfter = seen.filter((e) => e.name === 'seek' && e.phase === 'after').pop()
+  check('seek 在直播无限流下 applied=false', seekAfter && seekAfter.applied === false)
+  pCmd.destroy()
+}
+
+// 27. 容器零尺寸自检
+{
+  const pSize = createPlayer({ container: '#playerSize' })
+  // fixture 无测量能力 → 不得把「测不到」当 0
+  const noMeasureWarns = []
+  const orig = console.warn
+  console.warn = (...a) => noMeasureWarns.push(a.map(String).join(' '))
+  await pSize.play('https://cdn/size.m3u8')
+  console.warn = orig
+  check('测不到尺寸时不告警（不把「测不到」当 0）', !noMeasureWarns.some((w) => w.includes('容器尺寸为 0')))
+
+  // 明确报告 0 尺寸 → 告警，且只报一次
+  pSize.root.getBoundingClientRect = () => ({ width: 0, height: 0 })
+  const zeroWarns = []
+  console.warn = (...a) => zeroWarns.push(a.map(String).join(' '))
+  await pSize.play('https://cdn/size2.m3u8')
+  await pSize.play('https://cdn/size3.m3u8')
+  console.warn = orig
+  check('零尺寸时告警一次且不重复', zeroWarns.filter((w) => w.includes('容器尺寸为 0')).length === 1)
+  pSize.destroy()
+}
+
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)
 process.exit(failures === 0 ? 0 : 1)

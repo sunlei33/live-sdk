@@ -3,7 +3,7 @@
  * （web-default / react-custom / app-webview），逐字验证 SDK 暴露的 API 面与默认值。
  * 本文件若通过 `tsc --noEmit`，即证明 SDK 满足 skill 所承诺的接入契约。
  */
-import { createPlayer, BasePlugin, Events, ERROR_CODE, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
+import { createPlayer, BasePlugin, Events, ERROR_CODE, ERROR_DOMAIN, COMMAND_NAMES, errorDomainOf, readElementSize, isZeroSized, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
 import type { SentryLike } from 'live-sdk'
 import { mountDefaultUI } from 'live-sdk/ui'
 import { usePlayer as usePlayerReact } from 'live-sdk/react'
@@ -29,6 +29,9 @@ import type {
   BufferUpdatePayload,
   CommandHookContext,
   HookPhase,
+  CommandEventPayload,
+  CommandName,
+  ErrorDomain,
 } from 'live-sdk'
 
 // ══════════ 场景 1：纯 H5 + 默认 UI（assets/web-default.html） ══════════
@@ -349,6 +352,46 @@ player4.useHooks('switchQuality', (ctx) => {
 player4.useHooks('play', (ctx) => void (ctx as CommandHookContext).phase)
 player4.useHooks('switchURL', (ctx) => void (ctx as CommandHookContext).url)
 
+// ══════════ 场景 15：错误域 / 命令观测 / 容器自检（0.5.0） ══════════
+
+// 15.1 错误域：接入方直接读 `err.domain`，不必自建「错误码 → 方向」映射表
+player.on('error', (err) => {
+  const e = err as PlayerError
+  const domain: ErrorDomain = e.domain
+  if (domain === ERROR_DOMAIN.NETWORK) {
+    /* 归因：服务端 / CDN / 链路 */
+  } else if (domain === ERROR_DOMAIN.DECODE) {
+    /* 归因：内容 / 转码 / 内核 */
+  } else if (domain === ERROR_DOMAIN.CONFIG) {
+    /* 归因：接入侧配置 / 平台能力 */
+  } else {
+    /* ERROR_DOMAIN.UNKNOWN：映射表未覆盖，如实暴露而不是猜 */
+  }
+})
+
+// 也可对任意错误码字符串直接求域（用于上报管道里已有的 code）
+const domainOfManifest: ErrorDomain = errorDomainOf(ERROR_CODE.MANIFEST_404)
+const domainOfUnknownCode: ErrorDomain = errorDomainOf('some_future_code')
+
+// 15.2 统一命令观测：一次订阅拿到全部 12 个命令
+player.on('command', (payload) => {
+  const c = payload as CommandEventPayload
+  const name: CommandName = c.name
+  const phase: HookPhase = c.phase
+  const applied: boolean | undefined = c.applied
+  if (phase === 'after' && applied === false) {
+    /* `${name}` 未生效（no-op）—— 如 live 下的 seek、档位表里没有的 switchQuality */
+  }
+})
+
+// 命令名可在运行时枚举（12 个，与 PlayerCommands 的键一一对应）
+const allCommands: readonly CommandName[] = COMMAND_NAMES
+const commandCount: number = allCommands.length
+
+// 15.3 容器尺寸自检（「接入后不显示」的排查加速）
+const size = readElementSize(player.root)
+const zero: boolean = size ? isZeroSized(size) : false // size=null 表示环境测不到，不可判为 0
+
 export {
   eqFirstFrame,
   eqFeatures,
@@ -377,4 +420,9 @@ export {
   bufferLevels,
   levelEdges,
   levelIsMonotonic,
+  domainOfManifest,
+  domainOfUnknownCode,
+  allCommands,
+  commandCount,
+  zero,
 }

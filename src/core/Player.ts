@@ -15,6 +15,7 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_NETWORK_STRATEGY,
   bufferLevelOf,
+  type CommandName,
   type SessionState,
 } from '../constants'
 import { deepMerge, resolveContainer } from '../utils/config'
@@ -22,7 +23,8 @@ import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../utils/sniffe
 import { logger } from '../utils/logger'
 import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/retry'
 import { matchFeature } from '../utils/features'
-import { mapErrorCode, isFatalKernelError, mapMediaErrorCode } from '../utils/errors'
+import { mapErrorCode, isFatalKernelError, mapMediaErrorCode, errorDomainOf } from '../utils/errors'
+import { readElementSize, isZeroSized } from '../utils/size'
 import type {
   AppStateKey,
   BufferInfo,
@@ -32,6 +34,7 @@ import type {
   FeatureStatus,
   FeatureStatusReport,
   FeatureKey,
+  HookPhase,
   Kernel,
   KernelCapabilities,
   KernelConstructor,
@@ -109,6 +112,7 @@ export class Player {
   private disposedSubs: Array<() => void> = []
   private posterEl: HTMLImageElement | null = null // overlay 模式的封面图层（懒建）
   private progressSecond = -1 // 已同步到快照的整秒位置（节流用）
+  private sizeWarned = false // 容器零尺寸告警只报一次，避免刷屏
   /**
    * 上次已派发的缓冲水位档位（`-1` = 本轮尚未派发过）。
    * `BUFFER_UPDATE` 的节流状态：只在档位**跨越边界**时派发，见 `checkBufferLevel()`。
@@ -207,15 +211,27 @@ export class Player {
   // ═══════════════ 命令契约（PlayerCommands） ═══════════════
 
   async play(input?: PlayInput): Promise<void> {
-    if (this.destroyed) return
+    this.emitCommand('play', 'before')
+    if (this.destroyed) {
+      this.emitCommand('play', 'after', false)
+      return
+    }
+    // 起播这一刻仍无尺寸 → 大概率是接入问题（见 warnIfZeroSize）
+    this.warnIfZeroSize()
     const reqId = ++this.playRequestId
 
     // 前置钩子：可异步拦截本次起播（如「未登录不允许起播」「先补一次鉴权」）。
     // 放在 reqId 自增之后：钩子 await 期间若有新的 play() 进来，reqId 失配会被下面的
     // 检查挡掉，不会出现两次起播各自加载的竞态。
     const hookCtx = this.hookCtx({ input })
-    if (await this.hookBefore('play', hookCtx)) return
-    if (reqId !== this.playRequestId) return
+    if (await this.hookBefore('play', hookCtx)) {
+      this.emitCommand('play', 'after', false) // 被钩子拦截
+      return
+    }
+    if (reqId !== this.playRequestId) {
+      this.emitCommand('play', 'after', false) // 被更新的 play() 取代，本次未产生作用
+      return
+    }
 
     // 无参 play()：若已成功起播过（hasLoaded），语义是「恢复播放」而非「重新起播」——
     // 对应状态机 paused →(play)→ playing，不重新拉流（直播恢复不该重建 buffer）。
@@ -230,16 +246,21 @@ export class Player {
         await this.mediaProxy.play()
       } catch (err) {
         // 被中断（AbortError）视为正常竞态；被拦截（NotAllowedError）回滚后静默。
-        if (this.handlePlayRejection(err)) return
+        if (this.handlePlayRejection(err)) {
+          this.emitCommand('play', 'after', false)
+          return
+        }
         // 起播失败（如自动播放被拦截）：回滚快照与意图，交由接入方处理
         this.playIntent = false
         this.mediaPaused = true
         this.state.set({ playing: false })
         const e = this.makeError(ERROR_CODE.PLAY_FAILED, (err as Error).message, false)
         this.dispatchError(e)
+        this.emitCommand('play', 'after', false)
         throw err
       }
       await this.hookAfter('play', hookCtx, true)
+      this.emitCommand('play', 'after', true)
       return
     }
 
@@ -249,9 +270,13 @@ export class Player {
     } catch (err) {
       const e = this.makeError(ERROR_CODE.CONFIG_RESOLVE_FAILED, `起播配置解析失败：${(err as Error).message}`, true)
       this.dispatchError(e)
+      this.emitCommand('play', 'after', false)
       throw err
     }
-    if (reqId !== this.playRequestId) return // 过期请求忽略
+    if (reqId !== this.playRequestId) {
+      this.emitCommand('play', 'after', false) // 过期请求忽略
+      return
+    }
 
     this.currentPlayConfig = cfg
     const muted = cfg.muted ?? this.config.muted ?? false
@@ -285,12 +310,17 @@ export class Player {
       this.applyLiveLatency()
     } catch (err) {
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false))
+      this.emitCommand('play', 'after', false)
       throw err
     }
     await this.hookAfter('play', hookCtx, true)
+    // 注：`autoplay: false` 时 applied 仍为 true —— 命令完成了它被要求的事（加载但不自动播），
+    // 不是「空转」。要判断「是否真的开始播放」，看 `PlayerState.playing`。
+    this.emitCommand('play', 'after', true)
   }
 
   pause(): void {
+    this.emitCommand('pause', 'before')
     this.mediaProxy.pause()
     // 显式暂停 = 用户意图转为「不播」，重连逻辑不应再把它还原为播放中
     this.playIntent = false
@@ -299,16 +329,21 @@ export class Player {
     // 这里先行纠正快照，随后到达的 media `pause` 事件做幂等确认。
     this.mediaPaused = true
     if (this.state.get().playing) this.state.set({ playing: false })
+    this.emitCommand('pause', 'after', true)
   }
 
   mute(m: boolean): void {
+    this.emitCommand('mute', 'before')
     this.mediaProxy.muted = m
     this.state.set({ muted: m })
+    this.emitCommand('mute', 'after', true)
   }
 
   setVolume(v: number): void {
+    this.emitCommand('setVolume', 'before')
     this.mediaProxy.volume = v
     this.state.set({ volume: v })
+    this.emitCommand('setVolume', 'after', true)
   }
 
   /**
@@ -317,8 +352,13 @@ export class Player {
    * 告知是否真的切了（内核无 `qualitySwitch` 能力、或 `id` 不在档位表里时为 `false`）。
    */
   async switchQuality(id: number): Promise<void> {
+    this.emitCommand('switchQuality', 'before')
     const ctx = this.hookCtx({ id })
-    if (await this.hookBefore('switchQuality', ctx)) return
+    if (await this.hookBefore('switchQuality', ctx)) {
+      // 被钩子拦截：命令已返回但**未生效**，因此补一次 applied=false 的 after
+      this.emitCommand('switchQuality', 'after', false)
+      return
+    }
 
     let applied = false
     if (this.kernel?.capabilities.qualitySwitch) {
@@ -339,6 +379,7 @@ export class Player {
       }
     }
     await this.hookAfter('switchQuality', ctx, applied)
+    this.emitCommand('switchQuality', 'after', applied)
   }
 
   /**
@@ -346,9 +387,16 @@ export class Player {
    * 未通过校验时直接拒绝），after 在切流成功后触发。
    */
   async switchURL(url: string): Promise<void> {
-    if (this.destroyed || !this.kernel) throw new Error('内核未初始化')
+    this.emitCommand('switchURL', 'before')
+    if (this.destroyed || !this.kernel) {
+      this.emitCommand('switchURL', 'after', false)
+      throw new Error('内核未初始化')
+    }
     const ctx = this.hookCtx({ url })
-    if (await this.hookBefore('switchURL', ctx)) return
+    if (await this.hookBefore('switchURL', ctx)) {
+      this.emitCommand('switchURL', 'after', false)
+      return
+    }
     try {
       await this.kernel.switchURL(url)
       if (this.currentPlayConfig) this.currentPlayConfig.url = url
@@ -356,10 +404,12 @@ export class Player {
       // 但会话统计不重置 —— 换源属于同一次观看行为，切开会让观看时长/卡顿次数断裂。
       this.state.set({ usingBackup: false })
     } catch (err) {
+      this.emitCommand('switchURL', 'after', false)
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false))
       throw err
     }
     await this.hookAfter('switchURL', ctx, true)
+    this.emitCommand('switchURL', 'after', true)
   }
 
   /**
@@ -377,11 +427,15 @@ export class Player {
    * 无论全屏的是 video 还是容器，`PlayerState.fullscreen` 都会正确同步。
    */
   requestFullscreen(target?: Element): void {
+    this.emitCommand('requestFullscreen', 'before')
     this.mediaProxy.requestFullscreen(target)
+    this.emitCommand('requestFullscreen', 'after', true)
   }
 
   exitFullscreen(): void {
+    this.emitCommand('exitFullscreen', 'before')
     this.mediaProxy.exitFullscreen()
+    this.emitCommand('exitFullscreen', 'after', true)
   }
 
   /**
@@ -391,10 +445,15 @@ export class Player {
    * 任意定位只会持续累积延迟（README「Non-Goals」）；点播 / 重播回放为正常用法。
    */
   seek(time: number): void {
-    if (this.destroyed) return
+    this.emitCommand('seek', 'before')
+    if (this.destroyed) {
+      this.emitCommand('seek', 'after', false)
+      return
+    }
     const duration = this.media.duration
     if (!Number.isFinite(duration)) {
       logger.debug('[live-sdk] seek 在直播无限流上不生效（点播/重播态可用）')
+      this.emitCommand('seek', 'after', false)
       return
     }
     const upper = duration > 0 ? duration : time
@@ -404,6 +463,7 @@ export class Player {
     // getState().currentTime 会拿到旧值；此处先纠正快照与节流游标。
     this.progressSecond = Math.floor(target)
     this.state.set({ currentTime: target })
+    this.emitCommand('seek', 'after', true)
   }
 
   /**
@@ -411,19 +471,27 @@ export class Player {
    * 点播 / 重播回放为正常用法。写后读回，快照反映浏览器实际生效值（可能被钳制）。
    */
   setPlaybackRate(rate: number): void {
-    if (this.destroyed) return
+    this.emitCommand('setPlaybackRate', 'before')
+    if (this.destroyed) {
+      this.emitCommand('setPlaybackRate', 'after', false)
+      return
+    }
     try {
       this.mediaProxy.playbackRate = rate
     } catch {
       logger.warn(`[live-sdk] 倍速入参非法，已忽略：${rate}`)
+      this.emitCommand('setPlaybackRate', 'after', false)
       return
     }
     this.state.set({ playbackRate: this.mediaProxy.playbackRate })
+    this.emitCommand('setPlaybackRate', 'after', true)
   }
 
   /** 运行时更换封面（`undefined` / 空串 = 移除）；呈现方式仍由 `PlayerConfig.posterMode` 决定。 */
   setPoster(poster?: string): void {
+    this.emitCommand('setPoster', 'before')
     this.applyPoster(poster)
+    this.emitCommand('setPoster', 'after', true)
   }
 
   /**
@@ -431,8 +499,13 @@ export class Player {
    * 的动态策略；内核无 `setLiveLatency` 能力时静默忽略。
    */
   setLiveLatency(target?: number, max?: number): void {
+    this.emitCommand('setLiveLatency', 'before')
     this.latencyOverride = target === undefined && max === undefined ? null : { target, max }
+    // `applyLiveLatency` 在内核无该能力时直接 return（静默忽略）——如实回报 applied=false，
+    // 接入方据此知道「这条命令在当前内核上没作用」，而不是以为设置成功了。
+    const applied = typeof this.kernel?.setLiveLatency === 'function'
     this.applyLiveLatency()
+    this.emitCommand('setLiveLatency', 'after', applied)
   }
 
   // ═══════════════ 状态契约 ═══════════════
@@ -1059,6 +1132,35 @@ export class Player {
     this.sessionFirstFrameCost = Date.now() - this.sessionLoadStartTime
   }
 
+  // ═══════════════ 内部：接入期自检 ═══════════════
+
+  /**
+   * 容器零尺寸告警（**每个实例只报一次**）。
+   *
+   * 「接入后画面不显示」最常见的原因就是**容器没有高度**：`width/height: 100%` 的元素
+   * 在父级未给出确定高度时高度即为 0。此时 SDK 侧一切正常——`play()` 成功、没有 error 事件、
+   * 内核在拉流——但一个像素都看不见，接入方往往要排查很久。
+   *
+   * 两个约束：
+   * - **只报一次**：`play()` 会被多次调用，重复告警等于噪声；
+   * - **测量不到就不报**：非浏览器环境与自建 DOM 替身没有 `getBoundingClientRect` /
+   *   `offsetWidth`，把它们当成 0 会满屏误报（见 `readElementSize`）。
+   *
+   * **只在 `play()` 时检查，不在构造时检查**：构造时容器合法为 0 的场景很常见
+   * （未激活的 tab、路由过渡中的 `display:none`、懒挂载），那时告警误报率过高；
+   * 而「起播这一刻仍然没有尺寸」才是真正值得提示的信号。
+   */
+  private warnIfZeroSize(): void {
+    if (this.sizeWarned || this.destroyed) return
+    const size = readElementSize(this.root)
+    if (!size || !isZeroSized(size)) return
+    this.sizeWarned = true
+    logger.warn(
+      `容器尺寸为 0（${size.width}×${size.height}），播放器不会有可见画面。` +
+        `请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。`,
+    )
+  }
+
   // ═══════════════ 内部：封面图层（posterMode） ═══════════════
 
   /**
@@ -1215,7 +1317,24 @@ export class Player {
 
   private makeError(code: string, message: string, fatal: boolean, diagnostic?: RetryDiagnostic): PlayerError {
     if (diagnostic) this.lastRetryDiagnostic = diagnostic
-    return { code, message, fatal, retryCount: this.retryCount, diagnostic: diagnostic ?? this.lastRetryDiagnostic ?? undefined }
+    return {
+      code,
+      // 域由错误码派生（见 ERROR_DOMAIN）：接入方直接读 err.domain 做分流，
+      // 不必自己维护「错误码 → 方向」映射表（那样必然随 ERROR_CODE 新增而失同步）。
+      domain: errorDomainOf(code),
+      message,
+      fatal,
+      retryCount: this.retryCount,
+      diagnostic: diagnostic ?? this.lastRetryDiagnostic ?? undefined,
+    }
+  }
+
+  /**
+   * 派发命令观测事件（`COMMAND`，见 `CommandEventPayload`）。
+   * 每个命令在进入实现前派 `'before'`、返回前派 `'after'`，**成对**。
+   */
+  private emitCommand(name: CommandName, phase: HookPhase, applied?: boolean): void {
+    this.emit(Events.COMMAND, { name, phase, applied, time: Date.now() })
   }
 
   private dispatchError(err: PlayerError): void {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { mapErrorCode, isFatalKernelError, mapMediaErrorCode } from '../src/utils/errors'
-import { ERROR_CODE } from '../src/constants'
+import { mapErrorCode, isFatalKernelError, mapMediaErrorCode, errorDomainOf } from '../src/utils/errors'
+import { ERROR_CODE, ERROR_DOMAIN } from '../src/constants'
 
 describe('mapErrorCode', () => {
   it('【回归】hls.js camelCase details 必须被识别（原实现只匹配大写 → 全落 UNKNOWN）', () => {
@@ -65,6 +65,51 @@ describe('isFatalKernelError', () => {
 
   it('普通分片错误非 fatal', () => {
     expect(isFatalKernelError('fragLoadError', 'networkError', true)).toBe(false)
+  })
+})
+
+describe('errorDomainOf —— 错误码到「该去哪儿排查」的收敛层', () => {
+  it('【契约】ERROR_CODE 全量值都必须有明确归属，且不落 unknown', () => {
+    // 这条断言的作用：新增 ERROR_CODE 时若忘了登记域映射表，CI 会在这里失败。
+    // 否则接入方会在生产上收到一堆 domain='unknown'，退化成「没法按域分流」。
+    for (const code of Object.values(ERROR_CODE)) {
+      const domain = errorDomainOf(code)
+      expect(Object.values(ERROR_DOMAIN)).toContain(domain)
+      if (code !== ERROR_CODE.UNKNOWN) {
+        expect(domain, `错误码「${code}」未登记到 DOMAIN_BY_CODE`).not.toBe(ERROR_DOMAIN.UNKNOWN)
+      }
+    }
+  })
+
+  it('network 域：主 playlist / 分片 / 网络 / 超时 / 重试耗尽', () => {
+    expect(errorDomainOf(ERROR_CODE.MANIFEST_LOAD_ERROR)).toBe('network')
+    expect(errorDomainOf(ERROR_CODE.MANIFEST_404)).toBe('network')
+    expect(errorDomainOf(ERROR_CODE.FRAG_LOAD_ERROR)).toBe('network')
+    expect(errorDomainOf(ERROR_CODE.NETWORK_ERROR)).toBe('network')
+    expect(errorDomainOf(ERROR_CODE.LOAD_TIMEOUT)).toBe('network')
+    expect(errorDomainOf(ERROR_CODE.RETRY_EXHAUSTED)).toBe('network')
+  })
+
+  it('decode 域：解码 / 源不支持 / DRM（内容侧）', () => {
+    expect(errorDomainOf(ERROR_CODE.MEDIA_DECODE_ERROR)).toBe('decode')
+    expect(errorDomainOf(ERROR_CODE.MEDIA_SRC_NOT_SUPPORTED)).toBe('decode')
+    expect(errorDomainOf(ERROR_CODE.DRM_NO_LICENSE)).toBe('decode')
+  })
+
+  it('config 域：起播配置 / 无可用内核 / 自动播放被拦', () => {
+    expect(errorDomainOf(ERROR_CODE.CONFIG_RESOLVE_FAILED)).toBe('config')
+    expect(errorDomainOf(ERROR_CODE.NO_SUPPORTED_KERNEL)).toBe('config')
+    expect(errorDomainOf(ERROR_CODE.PLAY_FAILED)).toBe('config')
+  })
+
+  it('未知码如实标 unknown —— 不猜测、不并进 decode', () => {
+    // 早期业务侧的做法是「不认识就保守归 decode（播放器自己的问题）」，
+    // 代价是真实的未知故障被伪装成解码问题、排查方向跑偏。SDK 层如实暴露。
+    expect(errorDomainOf('some_future_code')).toBe('unknown')
+    expect(errorDomainOf(ERROR_CODE.UNKNOWN)).toBe('unknown')
+    expect(errorDomainOf('')).toBe('unknown')
+    expect(errorDomainOf(undefined)).toBe('unknown')
+    expect(errorDomainOf(null)).toBe('unknown')
   })
 })
 

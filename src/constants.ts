@@ -23,6 +23,8 @@ export enum Events {
   VISIBILITY_CHANGE = 'visibility_change',
   FEATURES_UPDATED = 'features_updated',
   KERNEL_EVENT = 'kernel_event',
+  /** 统一的命令观测事件（覆盖全部 12 个命令，见 `CommandEventPayload` / §6.4） */
+  COMMAND = 'command',
 }
 
 /** 错误码常量表（控制台与上报双通道） */
@@ -49,6 +51,55 @@ export const ERROR_CODE = {
 } as const
 
 export type ErrorCode = (typeof ERROR_CODE)[keyof typeof ERROR_CODE]
+
+/**
+ * 错误**域**：把 `ERROR_CODE` 收敛到「**该去哪儿排查**」的三个方向（外加一个 unknown 兜底）。
+ *
+ * 为什么要单独一层：错误码是**枚举**（13 个、还会随版本增加），而接入方的可观测看板只关心
+ * 粗粒度的**归因方向**——「这是服务端/CDN 的问题、内容的问题，还是我自己接错了」。
+ * 没有这一层时，每个接入方都得自己维护「code → 方向」的映射表，并且**新增错误码时必然漏同步**
+ * （实测某业务为此写了 20+ 行的两个 Set + 关键词兜底，仍不保证与 SDK 一致）。
+ *
+ * | 域 | 归因方向 | 典型表现 |
+ * |---|---|---|
+ * | `network` | **服务端 / CDN / 链路** | 主 playlist 与分片拉不到、超时、重试耗尽 |
+ * | `decode` | **内容 / 转码 / 播放内核** | 解码失败、容器格式不被支持、DRM 无 license |
+ * | `config` | **接入侧配置 / 平台能力** | 起播配置解析失败、无可用内核、自动播放被策略拦截 |
+ * | `unknown` | **未归类** | 新增或未覆盖的错误码；**不猜**，由接入方自行决定如何处理 |
+ *
+ * 关于 `unknown` 为什么独立成一档：别把它悄悄并进某一域。并入 `decode`（"播放器自己的问题"）
+ * 是最常见的做法，代价是**真实的未知故障会被伪装成解码问题**，排查方向直接跑偏。
+ * 如实暴露 `unknown` 才能让「映射表漏了」这件事被看见。
+ */
+export const ERROR_DOMAIN = {
+  NETWORK: 'network',
+  DECODE: 'decode',
+  CONFIG: 'config',
+  UNKNOWN: 'unknown',
+} as const
+
+export type ErrorDomain = (typeof ERROR_DOMAIN)[keyof typeof ERROR_DOMAIN]
+
+/**
+ * 命令名：`COMMAND` 事件的 `name` 字段，与 `PlayerCommands` 的键一一对应（**12 个，全覆盖**）。
+ * 放在常量里而非从类型推导，是为了让运行时也能枚举校验（见 `verify/smoke.mjs`）。
+ */
+export const COMMAND_NAMES = [
+  'play',
+  'pause',
+  'mute',
+  'setVolume',
+  'switchQuality',
+  'switchURL',
+  'requestFullscreen',
+  'exitFullscreen',
+  'seek',
+  'setPlaybackRate',
+  'setPoster',
+  'setLiveLatency',
+] as const
+
+export type CommandName = (typeof COMMAND_NAMES)[number]
 
 /**
  * 缓冲水位分档边界（秒，升序）。`BUFFER_UPDATE` 的派发判据。
