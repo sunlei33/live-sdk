@@ -25,7 +25,9 @@ export { NativeKernel } from './kernel/NativeKernel'
 // 理由见 README 能力边界·类型四（第三方系统能力不属播放器核心职责）；
 // 可直接复制的 Sentry 样板见 `examples/reporter-sentry.ts`。
 export { WebEnvAdapter } from './env/WebEnvAdapter'
-export { ConsoleReporter } from './reporter/ConsoleReporter'
+// 随 SDK 附带、经 `preset` / `registerPlugin` 装配的插件都在 `plugins/`
+// （`ConsoleReporter` 与 `LivePolling` 同属 `preset.live`，故同目录）
+export { ConsoleReporter } from './plugins/ConsoleReporter'
 export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 

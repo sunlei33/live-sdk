@@ -6,7 +6,7 @@ import { Hooks } from './Hooks'
 import { PluginManager } from './PluginManager'
 import { HlsKernel } from '../kernel/HlsKernel'
 import { NativeKernel } from '../kernel/NativeKernel'
-import { ConsoleReporter } from '../reporter/ConsoleReporter'
+import { ConsoleReporter } from '../plugins/ConsoleReporter'
 import { LivePolling } from '../plugins/LivePolling'
 import { WebEnvAdapter } from '../env/WebEnvAdapter'
 import {
