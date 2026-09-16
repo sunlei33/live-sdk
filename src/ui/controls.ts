@@ -115,7 +115,8 @@ export class QualityPanel extends UIPlugin {
         .join('')
       this.select.value = String(current ?? -1)
     })
-    const onChange = () => player.switchQuality(Number(this.select.value))
+    // `switchQuality` 返回 Promise（内部 await before 钩子），语句式触发即可 —— 失败会走 ERROR 通道
+    const onChange = () => void player.switchQuality(Number(this.select.value))
     this.select.addEventListener('change', onChange)
     this.track(() => this.select.removeEventListener('change', onChange))
   }

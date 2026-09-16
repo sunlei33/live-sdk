@@ -215,7 +215,7 @@ player.on('features_updated', (report) => {
 | `play(input?)` | `Promise<void>` | 起播 / 恢复：**无参且已起播过 = 恢复播放**（不重拉流）；带参（URL / `PlayConfig` / provider）= 起播或重新起播 |
 | `pause()` | `void` | 暂停 |
 | `mute(m)` / `setVolume(v)` | `void` | 静音 / 音量 |
-| `switchQuality(id)` | `void` | 切清晰度（`Quality.id`；`-1` 恢复自动 ABR） |
+| `switchQuality(id)` | `Promise<void>` | 切清晰度（`Quality.id`；`-1` 恢复自动 ABR）。返回 Promise 是因为内部会 `await` 钩子；语句式调用无需 `await` |
 | `switchURL(url)` | `Promise<void>` | 运行中切流（保留会话状态） |
 | `requestFullscreen()` / `exitFullscreen()` | `void` | 进入 / 退出全屏（iOS 原生视频全屏亦可退出） |
 | `seek(time)` | `void` | 定位（秒），自动钳制到 `[0, duration]`。**直播无限流下为 noop**；点播/重播正常生效 |
@@ -228,6 +228,31 @@ player.on('features_updated', (report) => {
 > `play()` / `pause()` 会**同步更新** `getState().playing`（不等待浏览器异步派发的 `play` / `pause` 媒体事件），因此 UI 可在命令返回后立即读取快照渲染按钮，不会出现「画面已暂停、按钮仍是播放中」的错位。若需最精确的切换判据，可读 `player.media.paused`。
 >
 > `playing` 表达的是「**呈现给用户的播放/暂停语义**」而非瞬时会话态：断流重连（`error → retry → loading`）期间按钮**保持**「播放中」图标，不会被退避等待闪回成「播放」；反过来，用户在重连期间按下的暂停也会被尊重，重试成功后不会自动复活为播放。
+
+### 拦截内置逻辑（Hooks）
+
+`useHooks(name, fn)` 可以在内置命令执行前后插入自己的逻辑，最典型的用法是**拦截**：
+
+```js
+// 未登录时不允许切清晰度（也可以在这里补一次鉴权后再放行）
+player.useHooks('switchQuality', async (ctx) => {
+  if (ctx.phase === 'before' && !isLoggedIn()) ctx.cancelled = true
+  if (ctx.phase === 'after') report('quality', { id: ctx.id, applied: ctx.applied })
+})
+```
+
+三个命令已接线：`'play'` / `'switchQuality'` / `'switchURL'`（其余命令目前没有钩子）。约定如下：
+
+| 字段 | 说明 |
+|---|---|
+| `ctx.phase` | 同名钩子会被调用**两次**：`'before'`（内置逻辑前）与 `'after'`（内置逻辑后） |
+| `ctx.cancelled` | **仅 `'before'` 可写**。置 `true` 则跳过内置逻辑，命令直接返回 |
+| `ctx.applied` | **仅 `'after'` 可得**。内置逻辑是否真的生效；`false` = 判定为 no-op（如内核不支持切档、`id` 不在档位表里、`play()` 走恢复分支） |
+| 入参 | `'play'` → `ctx.input`；`'switchQuality'` → `ctx.id`；`'switchURL'` → `ctx.url` |
+
+`fn` 可以是 async —— **`'before'` 阶段会被 `await`**，因此「先查权限、再放行」这类异步前置判断是可靠的（代价是命令返回时机随之推迟）。`useHooks` 返回解绑函数。
+
+> 为什么用「写回 `ctx`」而不是「返回布尔值」：`HookFn` 的返回类型是 `void | Promise<void>`（钩子不承担返回值契约），所以拦截决策统一走可变上下文。这也让同一个处理器能靠 `ctx.phase` 同时承担前后两个阶段。
 
 ### 查询类方法
 
@@ -292,11 +317,34 @@ VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT
 LIVE_STATUS_ERROR_EVENT    // 'live_status_error'：LivePolling 轮询失败
 ```
 
-> ⚠️ `BUFFER_UPDATE` 目前是「**已声明、无触发**」的事件（全量检索无 `emit`），不要依赖它 ——
-> 需要缓冲水位请用 `bufferInfo()` 主动查询。它属于「契约已留位、触发时机尚未确定」的保留事件：
-> 缓冲水位只随 `timeupdate`/`progress` 变化（~4Hz），与整秒节流的进度同步语义冲突，
-> 尚无「既准确又不吵」的触发点。若长期不实现，应将其从 `Events` 移除 ——
-> 「订阅了一个永不触发的事件」这种静默不生效，比报错更难排查。
+#### `PLAY` 与 `PLAYING` 的区别
+
+两者都表示「开始播了」，但处在不同的时间点（与 `<video>` 原生事件语义一致）：
+
+| 事件 | 含义 | 触发时机 |
+|---|---|---|
+| `PLAY` | 播放**请求**已被内核接受 | `paused` 由 `true` 转 `false` 时（自动播放成功、用户点播、重连后恢复各一次） |
+| `PLAYING` | 媒体**真正开始输出** | 首帧可渲染时；每次起播（含换源）都会派发 |
+
+`PLAY` 与 `PAUSE` 严格成对；`PLAYING` 则与 `STALLED` / `RECOVERED` 一起描述播放质量。
+
+#### `BUFFER_UPDATE`：缓冲水位**档位**变化
+
+缓冲水位只随 `timeupdate` / `progress` 变化（~4Hz）。若每次都派发，等于给所有订阅方塞一条 4Hz 高频流；若完全不派发，接入方就只能自开 `setInterval` 轮询 `bufferInfo()`。折中做法是**只在档位跨越边界时**派发：
+
+```js
+player.on('buffer_update', (b) => {
+  // { level, remaining, length, totalRemaining, totalLength, behind, buffers }
+  if (b.level <= 1) showLowBufferHint() // 剩余可播 < 3s
+})
+```
+
+`level` 由「**当前播放块**的剩余可播时长」在 `BUFFER_LEVEL_THRESHOLDS = [1, 3, 5, 10, 20]`（秒）上分档得出，取值 `0`（最紧张）~ `5`（最充裕）。两个要点：
+
+- **按当前块（`remaining`）而非全量并集（`totalRemaining`）分档** —— 判定「还能不能连续播下去」只取决于当前块；孤岛场景下 buffer 里囤着 30s 但当前块只剩 0.5s 时，真正会发生的是卡顿。
+- **载荷带全量 `BufferInfo`**，所以按并集口径或延迟（`behind`）口径判定的接入方也能只订阅这一个事件；需要自定义阈值时直接读原始秒数即可，`BUFFER_LEVEL_THRESHOLDS` 与 `bufferLevelOf()` 均已导出。
+
+查询式接口 `bufferInfo()` 仍然保留，用于「事件之外的按需读取」。
 
 ### 直播状态轮询与失败处理（LivePolling）
 
@@ -477,6 +525,8 @@ npm run verify:all    # 全链路：单测 → 构建 → 冒烟 → E2E
 > `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright npm run e2e:install`
 
 E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重、近尾 `ended` 判定、Pointer Events、销毁清理），通过注入 `MockKernel` 驱动异常分支，不依赖真实直播流，因此 CI 上稳定不 flaky。选 Playwright 的关键理由之一是它**自带 WebKit**——这是唯一能覆盖 Safari 原生 HLS 回退路径（`NativeKernel`）的引擎。
+
+`npm run verify` 里还有一道**事件活性普查**（`verify/events.mjs`）：逐个统计 `Events` 枚举成员在 `src/` 中的实际 `emit` 派发点，**零派发即构建失败**。加它的原因是「声明了、导出了、`on()` 注册会成功、但永不触发」这类静默失效，类型校验、冒烟、E2E、单测**都拦不住**（详见技术实现档案 §9）。
 
 ## 许可
 
@@ -692,7 +742,7 @@ player.on('features_updated', (report) => {
 | `play(input?)` | `Promise<void>` | Start / resume: **no argument and already started = resume playback** (no re-fetch); with argument (URL / `PlayConfig` / provider) = start or restart |
 | `pause()` | `void` | Pause |
 | `mute(m)` / `setVolume(v)` | `void` | Mute / volume |
-| `switchQuality(id)` | `void` | Switch quality (`Quality.id`; `-1` restores auto ABR) |
+| `switchQuality(id)` | `Promise<void>` | Switch quality (`Quality.id`; `-1` restores auto ABR). Returns a Promise because it awaits hooks; statement-style calls need no `await` |
 | `switchURL(url)` | `Promise<void>` | Switch stream at runtime (session state preserved) |
 | `requestFullscreen()` / `exitFullscreen()` | `void` | Enter / exit fullscreen (iOS native video fullscreen can also be exited) |
 | `seek(time)` | `void` | Seek (seconds), auto-clamped to `[0, duration]`. **No-op on an infinite live stream**; works for VOD / replay |
@@ -705,6 +755,31 @@ player.on('features_updated', (report) => {
 > `play()` / `pause()` **synchronously update** `getState().playing` (without waiting for the browser's asynchronously dispatched `play` / `pause` media events), so the UI can read the snapshot immediately after the command returns and render the button — no more "video paused but the button still shows playing". For the most precise switching criterion, read `player.media.paused`.
 >
 > `playing` expresses the "**play/pause semantics presented to the user**", not a transient session state: during reconnection (`error → retry → loading`) the button **keeps** the "playing" icon and will not flicker back to "play" while waiting for backoff; conversely, a pause pressed by the user during reconnection is respected and will not be revived to playing after a successful retry.
+
+### Intercepting built-in logic (Hooks)
+
+`useHooks(name, fn)` inserts your own logic around a built-in command — most typically to **intercept** it:
+
+```js
+// Disallow quality switching while signed out (or run an auth refresh, then let it through)
+player.useHooks('switchQuality', async (ctx) => {
+  if (ctx.phase === 'before' && !isLoggedIn()) ctx.cancelled = true
+  if (ctx.phase === 'after') report('quality', { id: ctx.id, applied: ctx.applied })
+})
+```
+
+Three commands are wired: `'play'` / `'switchQuality'` / `'switchURL'` (no hooks on the others yet). The conventions:
+
+| Field | Meaning |
+|---|---|
+| `ctx.phase` | The same hook is called **twice**: `'before'` (before the built-in logic) and `'after'` (after it) |
+| `ctx.cancelled` | **Writable in `'before'` only.** Setting `true` skips the built-in logic and returns immediately |
+| `ctx.applied` | **`'after'` only.** Whether the built-in logic actually took effect; `false` = resolved to a no-op (kernel lacks quality switching, unknown `id`, or `play()` took the resume branch) |
+| Arguments | `'play'` → `ctx.input`; `'switchQuality'` → `ctx.id`; `'switchURL'` → `ctx.url` |
+
+`fn` may be async — **the `'before'` phase is awaited**, so asynchronous gates ("check the permission first, then proceed") are reliable (at the cost of delaying the command's return). `useHooks` returns an unbind function.
+
+> Why write back to `ctx` instead of returning a boolean: `HookFn`'s return type is `void | Promise<void>` (hooks carry no return-value contract), so the interception decision travels through a mutable context. That also lets a single handler serve both phases by branching on `ctx.phase`.
 
 ### Query methods
 
@@ -769,8 +844,34 @@ Plugins additionally dispatch two **standalone event names** (deliberately kept 
 LIVE_STATUS_ERROR_EVENT    // 'live_status_error': LivePolling request failed
 ```
 
-> ⚠️ `BUFFER_UPDATE` is currently declared-but-never-emitted (a full search finds no `emit`). **Do not rely on it** —
-> call `bufferInfo()` for buffer levels, and judge low-buffer thresholds yourself (or fall back to the `stalled` event).
+#### `PLAY` vs `PLAYING`
+
+Both mean "playback started", but at different points in time (mirroring the native `<video>` event semantics):
+
+| Event | Meaning | Fires when |
+|---|---|---|
+| `PLAY` | the play **request** has been accepted by the kernel | `paused` flips `true` → `false` (autoplay success, user tap, post-reconnect resume) |
+| `PLAYING` | the media is **actually rendering** | first frame is presentable; every start (including source switches) |
+
+`PLAY` is strictly paired with `PAUSE`; `PLAYING` pairs with `STALLED` / `RECOVERED` to describe playback quality.
+
+#### `BUFFER_UPDATE`: buffer-level **bucket** changes
+
+Buffer levels only change on `timeupdate` / `progress` (~4 Hz). Emitting on every tick would push a 4 Hz stream to every subscriber; emitting never would force integrations to `setInterval`-poll `bufferInfo()`. The middle ground is to emit **only when the level crosses a bucket boundary**:
+
+```js
+player.on('buffer_update', (b) => {
+  // { level, remaining, length, totalRemaining, totalLength, behind, buffers }
+  if (b.level <= 1) showLowBufferHint() // less than 3s of playable data left
+})
+```
+
+`level` is derived from the **current playback block's** remaining playable time, bucketed on `BUFFER_LEVEL_THRESHOLDS = [1, 3, 5, 10, 20]` (seconds), ranging from `0` (tightest) to `5` (most comfortable). Two things to note:
+
+- **Bucketed on the current block (`remaining`), not the union (`totalRemaining`)** — whether playback can continue depends solely on the current block. In an island scenario where 30s is buffered elsewhere but only 0.5s remains in the current block, a stall is what actually happens.
+- **The payload carries the full `BufferInfo`**, so integrations judging by the union or by latency (`behind`) can live off this one event. For custom thresholds, read the raw seconds — `BUFFER_LEVEL_THRESHOLDS` and `bufferLevelOf()` are both exported.
+
+The query-style `bufferInfo()` remains available for on-demand reads outside the event.
 
 ### Live status polling and failure handling (LivePolling)
 
@@ -955,6 +1056,8 @@ npm run verify:all    # full chain: unit tests → build → smoke → E2E
 > `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright npm run e2e:install`
 
 E2E covers the cross-layer chain "kernel → Player → UI" (reconnection and de-duplication, near-tail `ended` detection, Pointer Events, destroy cleanup). It drives the failure branches by injecting a `MockKernel` rather than depending on a real live stream, so it is stable and non-flaky in CI. One key reason for choosing Playwright is that it **ships WebKit** — the only engine that can cover Safari's native HLS fallback path (`NativeKernel`).
+
+`npm run verify` also runs an **events liveness census** (`verify/events.mjs`): it counts the actual `emit` sites for every `Events` enum member across `src/`, and **fails the build on zero dispatch sites**. It exists because silent failures of the form "declared, exported, `on()` succeeds, but never fires" slip past type checks, smoke tests, E2E and unit tests alike (see the implementation dossier §9).
 
 ## License
 

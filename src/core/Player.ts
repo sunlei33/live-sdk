@@ -9,7 +9,14 @@ import { NativeKernel } from '../kernel/NativeKernel'
 import { ConsoleReporter } from '../reporter/ConsoleReporter'
 import { LivePolling } from '../plugins/LivePolling'
 import { WebEnvAdapter } from '../env/WebEnvAdapter'
-import { Events, ERROR_CODE, DEFAULT_CONFIG, DEFAULT_NETWORK_STRATEGY, type SessionState } from '../constants'
+import {
+  Events,
+  ERROR_CODE,
+  DEFAULT_CONFIG,
+  DEFAULT_NETWORK_STRATEGY,
+  bufferLevelOf,
+  type SessionState,
+} from '../constants'
 import { deepMerge, resolveContainer } from '../utils/config'
 import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../utils/sniffer'
 import { logger } from '../utils/logger'
@@ -19,6 +26,8 @@ import { mapErrorCode, isFatalKernelError, mapMediaErrorCode } from '../utils/er
 import type {
   AppStateKey,
   BufferInfo,
+  BufferUpdatePayload,
+  CommandHookContext,
   EnvAdapter,
   FeatureStatus,
   FeatureStatusReport,
@@ -100,6 +109,11 @@ export class Player {
   private disposedSubs: Array<() => void> = []
   private posterEl: HTMLImageElement | null = null // overlay 模式的封面图层（懒建）
   private progressSecond = -1 // 已同步到快照的整秒位置（节流用）
+  /**
+   * 上次已派发的缓冲水位档位（`-1` = 本轮尚未派发过）。
+   * `BUFFER_UPDATE` 的节流状态：只在档位**跨越边界**时派发，见 `checkBufferLevel()`。
+   */
+  private bufferLevel = -1
   /**
    * LL-HLS 延迟的**运行时覆盖**（`setLiveLatency` 命令写入），null = 未覆盖、
    * 回落到 `config.network` 的动态策略。与 config 分离是为了让「业务临时调低延迟」
@@ -196,6 +210,13 @@ export class Player {
     if (this.destroyed) return
     const reqId = ++this.playRequestId
 
+    // 前置钩子：可异步拦截本次起播（如「未登录不允许起播」「先补一次鉴权」）。
+    // 放在 reqId 自增之后：钩子 await 期间若有新的 play() 进来，reqId 失配会被下面的
+    // 检查挡掉，不会出现两次起播各自加载的竞态。
+    const hookCtx = this.hookCtx({ input })
+    if (await this.hookBefore('play', hookCtx)) return
+    if (reqId !== this.playRequestId) return
+
     // 无参 play()：若已成功起播过（hasLoaded），语义是「恢复播放」而非「重新起播」——
     // 对应状态机 paused →(play)→ playing，不重新拉流（直播恢复不该重建 buffer）。
     if (input === undefined && this.hasLoaded) {
@@ -218,6 +239,7 @@ export class Player {
         this.dispatchError(e)
         throw err
       }
+      await this.hookAfter('play', hookCtx, true)
       return
     }
 
@@ -265,6 +287,7 @@ export class Player {
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false))
       throw err
     }
+    await this.hookAfter('play', hookCtx, true)
   }
 
   pause(): void {
@@ -288,24 +311,44 @@ export class Player {
     this.state.set({ volume: v })
   }
 
-  switchQuality(id: number): void {
-    if (!this.kernel?.capabilities.qualitySwitch) return
-    if (id === -1) {
-      // 恢复自动（ABR）
-      this.kernel.switchQuality(-1)
-      this.state.set({ currentQuality: null })
-      this.emit(Events.ABR_CHANGE, { level: 'auto' })
-      return
+  /**
+   * 切换清晰度。前后会各派发一次 `'switchQuality'` 钩子（spec §3.6）——
+   * before 阶段写回 `ctx.cancelled = true` 可拦截本次切换，after 阶段 `ctx.applied`
+   * 告知是否真的切了（内核无 `qualitySwitch` 能力、或 `id` 不在档位表里时为 `false`）。
+   */
+  async switchQuality(id: number): Promise<void> {
+    const ctx = this.hookCtx({ id })
+    if (await this.hookBefore('switchQuality', ctx)) return
+
+    let applied = false
+    if (this.kernel?.capabilities.qualitySwitch) {
+      if (id === -1) {
+        // 恢复自动（ABR）
+        this.kernel.switchQuality(-1)
+        this.state.set({ currentQuality: null })
+        this.emit(Events.ABR_CHANGE, { level: 'auto' })
+        applied = true
+      } else {
+        const idx = this.qualityMap.get(id)
+        if (idx !== undefined) {
+          this.kernel.switchQuality(idx)
+          this.state.set({ currentQuality: id })
+          this.emit(Events.QUALITY_CHANGE, { id })
+          applied = true
+        }
+      }
     }
-    const idx = this.qualityMap.get(id)
-    if (idx === undefined) return
-    this.kernel.switchQuality(idx)
-    this.state.set({ currentQuality: id })
-    this.emit(Events.QUALITY_CHANGE, { id })
+    await this.hookAfter('switchQuality', ctx, applied)
   }
 
+  /**
+   * 运行中切流。前后各派发一次 `'switchURL'` 钩子 —— before 可拦截（如目标地址
+   * 未通过校验时直接拒绝），after 在切流成功后触发。
+   */
   async switchURL(url: string): Promise<void> {
     if (this.destroyed || !this.kernel) throw new Error('内核未初始化')
+    const ctx = this.hookCtx({ url })
+    if (await this.hookBefore('switchURL', ctx)) return
     try {
       await this.kernel.switchURL(url)
       if (this.currentPlayConfig) this.currentPlayConfig.url = url
@@ -316,6 +359,7 @@ export class Player {
       this.dispatchError(this.makeError(ERROR_CODE.MANIFEST_LOAD_ERROR, (err as Error).message, false))
       throw err
     }
+    await this.hookAfter('switchURL', ctx, true)
   }
 
   requestFullscreen(): void {
@@ -443,6 +487,31 @@ export class Player {
     return this.kernel?.bufferInfo() ?? { buffers: [], behind: 0, remaining: 0, length: 0, totalRemaining: 0, totalLength: 0 }
   }
 
+  /**
+   * 缓冲水位的**事件侧**（`bufferInfo()` 是查询侧）。
+   *
+   * 触发时机：media `progress`（缓冲区间变化）。
+   * 派发判据：**档位跨越** —— 把「当前播放块剩余可播时长」映射到 `BUFFER_LEVEL_THRESHOLDS`
+   * 定义的离散档位，只有在档位与上次派发不同时才 `emit`。
+   *
+   * 两个设计取舍：
+   * 1. **按 `remaining`（当前块）而非 `totalRemaining`（全量并集）分档** ——
+   *    判定「还能不能连续播下去」只取决于当前块；孤岛场景下 buffer 里囤着 30s 但当前块
+   *    只剩 0.5s 时，真正会发生的是卡顿，不是「缓冲充裕」。
+   * 2. **完整载荷**：`BufferInfo` 每个字段都带上（含 `totalRemaining` / `behind`），
+   *    所以按并集口径或延迟口径判定的接入方也能只靠这一个事件工作。
+   *
+   * 首帧前也允许派发 —— 起播阶段的缓冲爬升正是「起播慢」诊断需要的信号。
+   */
+  private checkBufferLevel(): void {
+    const info = this.bufferInfo()
+    const level = bufferLevelOf(info.remaining)
+    if (level === this.bufferLevel) return
+    this.bufferLevel = level
+    const payload: BufferUpdatePayload = { ...info, level }
+    this.emit(Events.BUFFER_UPDATE, payload)
+  }
+
   speedInfo(): SpeedInfo {
     const s = this.getStats()
     return { speed: s.speed ?? 0, avgSpeed: s.avgSpeed ?? 0 }
@@ -485,6 +554,9 @@ export class Player {
     this.stallCount = 0
     this.sessionLoadStartTime = Date.now()
     this.sessionFirstFrameCost = null
+    // 缓冲档位节流状态一并清零：新会话的第一份 bufferInfo 必须能派发出去，
+    // 否则「起播瞬间的低缓冲」会因与上一轮档位相同而被静默吞掉。
+    this.bufferLevel = -1
   }
 
   /** 结算进行中的「实际播放」时段（幂等：无进行中时段时为空操作）。 */
@@ -561,6 +633,47 @@ export class Player {
 
   async runHooks(name: string, ctx: Record<string, unknown>): Promise<void> {
     await this.hooks.run(name, ctx)
+  }
+
+  /**
+   * 命令的 **before** 钩子（spec §3.6）。返回 `true` = 本次操作被接入方拦截，内置逻辑应当跳过。
+   *
+   * 拦截协议：钩子通过**写回 `ctx.cancelled = true`** 表达取消（`HookFn` 的返回值是 `void`，
+   * 没有回传通道，故约定用可变 ctx 传递决策）。`ctx.phase` 恒为 `'before'`，便于同一个
+   * 处理器同时挂 before/after 时分支。
+   *
+   * 每次调用前重置 `cancelled` —— 防止上一次被拦截的残留值误伤本次调用。
+   */
+  /**
+   * 构造命令钩子上下文。初始 `phase` 取 `'before'` —— 它总会被 `hookBefore` / `hookAfter`
+   * 覆盖，这里只是为了让类型完整（钩子真正执行时两个字段必定就位）。
+   */
+  private hookCtx(extra: Record<string, unknown> = {}): CommandHookContext {
+    return { phase: 'before', cancelled: false, ...extra }
+  }
+
+  private async hookBefore(name: string, ctx: CommandHookContext): Promise<boolean> {
+    ctx.phase = 'before'
+    ctx.cancelled = false
+    await this.runHooks(name, ctx)
+    // 必须放宽类型后再判定：上面 `ctx.cancelled = false` 会把该属性窄化成字面量 `false`，
+    // 直接比较 `=== true` 会触发 TS2367（"类型 false 与 true 无重叠"）。
+    // 钩子在运行时是能改写它的，编译器看不到 —— 这正是「编译期把不变式钉死」的用法。
+    const cancelled: unknown = ctx.cancelled
+    return cancelled === true
+  }
+
+  /**
+   * 命令的 **after** 钩子。`applied` 告知内置逻辑是否**真的做了事**
+   * （如 `switchQuality` 遇到内核不支持、或 `id` 不在档位表里时为 `false`）——
+   * 钩子据此区分「操作生效了」与「操作被解析后判定为 no-op」。
+   *
+   * 只在操作**正常结束**时触发；抛错路径不触发（错误本身已由 `ERROR` 事件承载）。
+   */
+  private async hookAfter(name: string, ctx: CommandHookContext, applied: boolean): Promise<void> {
+    ctx.phase = 'after'
+    ctx.applied = applied
+    await this.runHooks(name, ctx)
   }
 
   /**
@@ -734,6 +847,11 @@ export class Player {
     on('canplay', () => this.onFirstFrameSignal())
     on('timeupdate', () => this.syncProgress())
     on('durationchange', () => this.syncProgress())
+    // 缓冲水位：挂 `progress`（缓冲区间变化时由浏览器派发），而非 `timeupdate`。
+    // 派发本身由档位跨越判定节流，见 checkBufferLevel()。
+    on('progress', () => this.checkBufferLevel())
+    // `play` 与下面的 `playing` 是两件事：前者=请求被接受（尚未出画），后者=真的在播。
+    on('play', () => this.onMediaPlay())
     on('playing', () => this.onMediaPlaying())
     on('pause', () => this.onMediaPause())
     on('waiting', () => this.onStall())
@@ -779,6 +897,24 @@ export class Player {
   private syncFullscreen(): void {
     const full = this.mediaProxy.isFullscreen()
     if (full !== this.state.get().fullscreen) this.state.set({ fullscreen: full })
+  }
+
+  /**
+   * media `play` 事件 → `PLAY`。
+   *
+   * 与 `onMediaPause` 严格对称（那边派发 `PAUSE`）—— 这一对称性本身就是它此前
+   * 缺失的证据：`PAUSE` 有 DOM 事件源而 `PLAY` 没有，属于接线漏了一半。
+   *
+   * 语义边界（与 HTMLMediaElement 原生事件语义一致，不要混用）：
+   * - `PLAY`    = 播放**请求**已被内核接受（`paused` 已转 false），**尚未渲染首帧**；
+   * - `PLAYING` = 媒体已真正开始输出（`onMediaPlaying`），首帧后每次起播都会派发。
+   *
+   * 因此自动播放成功、断线重连后恢复、二次 `play()` 都会各派发一次 `PLAY`。
+   * **不做初始化期噪声抑制**：`play` 事件只在 `paused` 由 true 变 false 时产生
+   * （不象 `pause` 会被 MSE attach 的 AbortError 连带触发），它每次都对应一次真实意图。
+   */
+  private onMediaPlay(): void {
+    this.emit(Events.PLAY)
   }
 
   private onMediaPlaying(): void {

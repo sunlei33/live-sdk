@@ -50,6 +50,33 @@ export const ERROR_CODE = {
 
 export type ErrorCode = (typeof ERROR_CODE)[keyof typeof ERROR_CODE]
 
+/**
+ * 缓冲水位分档边界（秒，升序）。`BUFFER_UPDATE` 的派发判据。
+ *
+ * **为什么需要它**：缓冲水位只随 `timeupdate` / `progress` 变化（~4Hz），
+ * 若每次都派发，等于给所有订阅方塞了一条 4Hz 的高频流，与「快照只放低频字段」的
+ * 整体节流原则冲突；若干脆不派发，接入方就只能自开 `setInterval` 轮询 `bufferInfo()`。
+ *
+ * 折中：把「剩余可播时长」映射到离散档位（0~5），**只在跨越边界时**派发。
+ * 语义上这正是订阅方真正关心的信息 ——「缓冲水位档位变了」，
+ * 而不是「缓冲又多了 0.07 秒」。低缓冲预警（如 `level <= 1`）因此变成一次订阅即可。
+ *
+ * 边界取 `[1, 3, 5, 10, 20]` 秒：1s 是「即将卡死」的硬线，3/5s 是弱网下的常见危险区，
+ * 10/20s 区分「缓冲充裕」与「缓冲非常充裕」。需要自定义阈值的接入方仍可直接读
+ * 载荷里的原始 `remaining` / `totalRemaining` 自行判定。
+ */
+export const BUFFER_LEVEL_THRESHOLDS = [1, 3, 5, 10, 20] as const
+
+/** 由「当前块剩余可播时长（秒）」求缓冲档位；`level` 越大越充裕（0 ~ 5）。 */
+export function bufferLevelOf(remaining: number): number {
+  let level = 0
+  for (const t of BUFFER_LEVEL_THRESHOLDS) {
+    if (remaining >= t) level++
+    else break
+  }
+  return level
+}
+
 /** 会话状态集合 */
 export type SessionState =
   | 'idle'

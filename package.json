@@ -1,6 +1,6 @@
 {
   "name": "@fancaf/live-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "H5 live-streaming player SDK (HLS + fMP4 + hls.js, headless kernel + plugin architecture)",
   "type": "module",
   "sideEffects": false,
@@ -43,7 +43,7 @@
     "test:coverage": "vitest run --coverage",
     "e2e": "playwright test",
     "e2e:install": "playwright install chromium webkit",
-    "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/smoke.mjs",
+    "verify": "tsc -p verify/tsconfig.json --noEmit && node verify/exports.mjs && node verify/events.mjs && node verify/smoke.mjs",
     "verify:all": "npm run test && npm run build && npm run verify && npm run e2e",
     "pack:check": "npm run build && npm pack --dry-run",
     "release": "node scripts/publish.mjs",

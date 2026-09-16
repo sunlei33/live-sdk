@@ -59,6 +59,47 @@ export interface BufferInfo {
   totalLength: number // 所有区间总长之和（s）
 }
 
+/**
+ * `BUFFER_UPDATE` 事件的载荷：`BufferInfo` 全量口径 + 派生档位。
+ *
+ * 为什么同时给「原始秒数」和「档位」：档位是**派发判据**（只有跨越档位边界才派发），
+ * 秒数是**判定依据**（接入方可按自己的阈值再判一次）。两者都在，订阅方不必二选一。
+ */
+export interface BufferUpdatePayload extends BufferInfo {
+  /** 缓冲水位档位（0 最紧张，5 最充裕）；边界见 `BUFFER_LEVEL_THRESHOLDS` */
+  level: number
+}
+
+/**
+ * 命令钩子的执行阶段（`useHooks(name, fn)` 的 `ctx.phase`）。
+ * - `'before'`：内置逻辑执行**前** —— 写回 `ctx.cancelled = true` 可阻止本次操作
+ * - `'after'` ：内置逻辑执行**后** —— 此时 `ctx.applied` 表明内置逻辑是否真的做了事
+ */
+export type HookPhase = 'before' | 'after'
+
+/**
+ * 命令钩子的上下文对象（`useHooks(name, fn)` 的回调入参）。
+ *
+ * **为什么是可变对象**：`HookFn` 的返回值被声明为 `void | Promise<void>`，没有回传通道，
+ * 因此「拦截」只能靠钩子**写回 ctx**表达 —— `ctx.cancelled = true` 即告知内置逻辑跳过。
+ * 这也让同一个处理器可以按 `ctx.phase` 同时承担 before / after 两个阶段。
+ *
+ * 各命令在 ctx 上附加的字段：
+ * | 钩子名 | 额外字段 |
+ * |---|---|
+ * | `'play'` | `input`：`play()` 的原始入参（可能为 `undefined`） |
+ * | `'switchQuality'` | `id`：请求的 `Quality.id`（`-1` = 自动） |
+ * | `'switchURL'` | `url`：目标地址 |
+ */
+export interface CommandHookContext extends Record<string, unknown> {
+  /** 当前阶段。同一个钩子名会被调用两次，用本字段区分 */
+  phase: HookPhase
+  /** **仅 `'before'` 阶段可写**：置 `true` 则跳过内置逻辑 */
+  cancelled: boolean
+  /** **仅 `'after'` 阶段**：内置逻辑是否真的生效（`false` = 判定为 no-op） */
+  applied?: boolean
+}
+
 /** 下载速率（对应 speedInfo） */
 export interface SpeedInfo {
   speed: number
@@ -169,7 +210,14 @@ export interface PlayerCommands {
   pause(): void
   mute(m: boolean): void
   setVolume(v: number): void
-  switchQuality(id: number): void
+  /**
+   * 切换清晰度（入参 = `Quality.id`，`-1` 表示恢复自动 ABR）。
+   *
+   * 返回 `Promise<void>` 而非 `void`：内置逻辑前会 `await` 挂载在 `'switchQuality'`
+   * 上的 before 钩子（spec §3.6），以便接入方异步拦截本次切换（如先查权限）。
+   * 不关心钩子的调用方照旧 `player.switchQuality(1)` 语句式调用即可，无需 `await`。
+   */
+  switchQuality(id: number): Promise<void>
   switchURL(url: string): Promise<void>
   requestFullscreen(): void
   /** 退出全屏（与 `requestFullscreen` 配对；iOS 原生视频全屏亦可退出） */

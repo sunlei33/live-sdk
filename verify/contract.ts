@@ -3,7 +3,7 @@
  * （web-default / react-custom / app-webview），逐字验证 SDK 暴露的 API 面与默认值。
  * 本文件若通过 `tsc --noEmit`，即证明 SDK 满足 skill 所承诺的接入契约。
  */
-import { createPlayer, BasePlugin, Events, ERROR_CODE, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT } from 'live-sdk'
+import { createPlayer, BasePlugin, Events, ERROR_CODE, SentryReporter, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
 import type { SentryLike } from 'live-sdk'
 import { mountDefaultUI } from 'live-sdk/ui'
 import { usePlayer as usePlayerReact } from 'live-sdk/react'
@@ -26,6 +26,9 @@ import type {
   KernelCapabilities,
   LiveStatusPayload,
   LiveStatusErrorPayload,
+  BufferUpdatePayload,
+  CommandHookContext,
+  HookPhase,
 } from 'live-sdk'
 
 // ══════════ 场景 1：纯 H5 + 默认 UI（assets/web-default.html） ══════════
@@ -303,6 +306,47 @@ const statsHasNoSessionAccumulator: boolean = !statsKeys.some((k) =>
 )
 void usingBackup
 
+// ══════════ 场景 14：事件活性与会话钩子（0.4.0） ══════════
+// 14.1 `PLAY` / `BUFFER_UPDATE` 不再是死事件：两者都进事件契约，值域与枚举一致
+const eqPlay: boolean = Events.PLAY === 'play'
+const eqBufferUpdate: boolean = Events.BUFFER_UPDATE === 'buffer_update'
+// 14.2 `BUFFER_UPDATE` 载荷 = 全量 BufferInfo + 派生档位
+player4.on(Events.BUFFER_UPDATE, (payload) => {
+  const b = payload as BufferUpdatePayload
+  const level: number = b.level
+  const remaining: number = b.remaining
+  const totalRemaining: number = b.totalRemaining
+  const behind: number = b.behind
+  const ranges: [number, number][] = b.buffers
+  void level
+  void remaining
+  void totalRemaining
+  void behind
+  void ranges
+})
+// 14.3 档位判据可静态调用；边界是公开常量（接入方可据此对齐自己的阈值）
+const bufferLevels: number[] = [0, 0.5, 1, 4, 30].map((s) => bufferLevelOf(s))
+const levelEdges: readonly number[] = BUFFER_LEVEL_THRESHOLDS
+const levelIsMonotonic: boolean = bufferLevels.every((v, i) => i === 0 || v >= bufferLevels[i - 1])
+// 14.4 `switchQuality` 返回 Promise（内部 await before 钩子）；语句式调用仍合法
+const qualitySwitchPromise: Promise<void> = player4.switchQuality(1)
+void qualitySwitchPromise
+// 14.5 命令钩子：同一个名字会以 before / after 两个阶段各调用一次
+player4.useHooks('switchQuality', (ctx) => {
+  const c = ctx as CommandHookContext
+  const phase: HookPhase = c.phase
+  if (phase === 'before') c.cancelled = true // 拦截协议：写回 ctx（HookFn 无返回值通道）
+  if (phase === 'after') {
+    const applied: boolean | undefined = c.applied
+    void applied
+  }
+  const id: unknown = c.id
+  void id
+})
+// `play` / `switchURL` 同样接线，ctx 上带各自入参
+player4.useHooks('play', (ctx) => void (ctx as CommandHookContext).phase)
+player4.useHooks('switchURL', (ctx) => void (ctx as CommandHookContext).url)
+
 export {
   eqFirstFrame,
   eqFeatures,
@@ -326,4 +370,9 @@ export {
   failureEventIsDistinct,
   sessionReport,
   statsHasNoSessionAccumulator,
+  eqPlay,
+  eqBufferUpdate,
+  bufferLevels,
+  levelEdges,
+  levelIsMonotonic,
 }

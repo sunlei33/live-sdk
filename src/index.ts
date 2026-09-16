@@ -28,7 +28,7 @@ export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 
 // —— 常量 ——
-export { Events, ERROR_CODE } from './constants'
+export { Events, ERROR_CODE, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from './constants'
 export type { SessionState } from './constants'
 
 // —— 工具 ——
@@ -42,6 +42,9 @@ export type {
   KernelCapabilities,
   StatsInfo,
   BufferInfo,
+  BufferUpdatePayload,
+  HookPhase,
+  CommandHookContext,
   SpeedInfo,
   LevelInfo,
   Kernel,
