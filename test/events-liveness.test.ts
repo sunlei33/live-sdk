@@ -8,6 +8,8 @@ type PlayerInstance = import('../src/core/Player').Player
 let dom: Dom
 let video: FakeMediaElement
 let PlayerCtor: typeof import('../src/core/Player').Player
+/** P0：`Player` 需注入平台装配包；测试用真实 Web 实现（动态导入，等 DOM 就绪） */
+let createWebPlatform: typeof import('../src/platform/web').createWebPlatform
 
 /**
  * 最小内核替身（与 player.test.ts 同构），额外把 switchQuality / load 变为可观测。
@@ -69,6 +71,7 @@ beforeEach(async () => {
   dom = installDom()
   video = dom.els['video'] ?? (dom.els['video'] = makeEl('video'))
   PlayerCtor ??= (await import('../src/core/Player')).Player
+  createWebPlatform ??= (await import('../src/platform/web')).createWebPlatform
 })
 
 afterEach(() => {
@@ -76,7 +79,7 @@ afterEach(() => {
 })
 
 function createPlayer(kernel: unknown = makeMockKernel()): PlayerInstance {
-  return new PlayerCtor({ container: '#c', kernel } as never)
+  return new PlayerCtor({ container: '#c', kernel } as never, createWebPlatform({ kernel: kernel as never }) as never)
 }
 
 /** 起播一次以内核就绪（内核是惰性创建的），并让状态机进入可用的会话态 */

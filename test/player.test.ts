@@ -8,6 +8,8 @@ type PlayerInstance = import('../src/core/Player').Player
 let dom: Dom
 let video: FakeMediaElement
 let PlayerCtor: typeof import('../src/core/Player').Player
+/** P0：`Player` 需注入平台装配包；测试用真实 Web 实现（动态导入，等 DOM 就绪） */
+let createWebPlatform: typeof import('../src/platform/web').createWebPlatform
 
 /**
  * 最小内核替身：load() 即视为 manifest 就绪，用于驱动 attemptPlay 分支。
@@ -59,6 +61,7 @@ beforeEach(async () => {
   video = dom.els['video'] ?? (dom.els['video'] = makeEl('video'))
   // DOM 就绪后再加载 Player（模块链会引入 hls.js，需先有 window/document）
   PlayerCtor ??= (await import('../src/core/Player')).Player
+  createWebPlatform ??= (await import('../src/platform/web')).createWebPlatform
 })
 
 afterEach(() => {
@@ -67,11 +70,16 @@ afterEach(() => {
 })
 
 function createPlayer(config: Record<string, unknown> = {}): PlayerInstance {
-  return new PlayerCtor({
-    container: '#c',
-    kernel: makeMockKernel() as never,
-    ...config,
-  } as never)
+  // P0 之后 Player 需要「平台装配包」第二参 —— 测试用真实的 Web 平台实现（跑在 DOM 替身上）
+  const platform = createWebPlatform({ kernel: makeMockKernel() as never })
+  return new PlayerCtor(
+    {
+      container: '#c',
+      kernel: makeMockKernel() as never,
+      ...config,
+    } as never,
+    platform as never,
+  )
 }
 
 describe('原生 media error 分派（MediaError.code）', () => {

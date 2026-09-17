@@ -1,14 +1,8 @@
 import { EventBus, type EventHandler } from './EventBus'
 import { StateMachine } from './StateMachine'
-import { MediaProxy } from './MediaProxy'
 import { StateStore } from './StateStore'
 import { Hooks } from './Hooks'
 import { PluginManager } from './PluginManager'
-import { HlsKernel } from '../kernel/HlsKernel'
-import { NativeKernel } from '../kernel/NativeKernel'
-import { ConsoleReporter } from '../plugins/ConsoleReporter'
-import { LivePolling } from '../plugins/LivePolling'
-import { WebEnvAdapter } from '../env/WebEnvAdapter'
 import {
   Events,
   ERROR_CODE,
@@ -18,13 +12,12 @@ import {
   type CommandName,
   type SessionState,
 } from '../constants'
-import { deepMerge, resolveContainer } from '../utils/config'
-import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../utils/sniffer'
+import { deepMerge } from '../utils/config'
 import { logger } from '../utils/logger'
 import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/retry'
 import { matchFeature } from '../utils/features'
 import { mapErrorCode, isFatalKernelError, mapMediaErrorCode, errorDomainOf } from '../utils/errors'
-import { readElementSize, isZeroSized } from '../utils/size'
+import { isZeroSized } from '../utils/size'
 import type {
   AppStateKey,
   BufferInfo,
@@ -35,14 +28,19 @@ import type {
   FeatureStatusReport,
   FeatureKey,
   HookPhase,
+  HostMount,
   Kernel,
   KernelCapabilities,
   KernelConstructor,
   LevelInfo,
+  MediaEventName,
+  MediaSurface,
   NetworkConfig,
   NetworkQuality,
   NetworkTunable,
+  PlatformAdapters,
   PlayerConfig,
+  PluginPresetEntry,
   PlayConfig,
   PlayInput,
   PlayerError,
@@ -58,14 +56,25 @@ import type {
   StatsInfo,
 } from '../types'
 
-/** 功能插件预设（不含内核——内核由 kernel 配置 / sniffer 选路，见 §3.5） */
-const PRESETS: Record<string, Array<{ new (): unknown; pluginName: string }>> = {
-  live: [ConsoleReporter, LivePolling],
-  vod: [ConsoleReporter],
+/**
+ * core 对「直播状态轮询插件」的全部了解：**只认行为形状，不认实现**。
+ *
+ * 这样 `LivePolling` 可以留在 `plugins/`（实现层），而 core 不必 `import` 它 ——
+ * 是 P0 解耦的一部分（见 `verify/layers.mjs`：core 不得依赖实现层）。
+ * 插件按名字装配（`preset.live` 由平台包给出），交互只经这一小段协议。
+ */
+interface LivePollingLike {
+  start(url?: unknown, interval?: number): void
+  stop(): void
 }
 
 export class Player {
   // —— 暴露给接入方的挂载点 ——
+  //
+  // ⚠️ **类型策略（有意为之，见 spec §3.10）**：这两个字段对外仍声明 Web 类型，
+  // 但**值来自注入的平台包**（`HostMount.root` / `MediaSurface.raw`，契约里是 `unknown`）。
+  // 于是 core 运行时不引用任何 DOM 全局，而公开类型对 Web 接入方零变化。
+  // 将来接非 Web 宿主时，这里需要放宽为泛型（已记为后续项）。
   readonly root: HTMLElement
   readonly media: HTMLVideoElement
 
@@ -74,7 +83,12 @@ export class Player {
   private stateMachine = new StateMachine()
   private hooks = new Hooks()
   private plugins: PluginManager
-  private mediaProxy: MediaProxy
+  /** 媒体设备面（由平台注入；core 不知道它是 `<video>` 还是别的宿主媒体） */
+  private surface: MediaSurface<unknown>
+  /** 宿主承载面（由平台注入；core 不知道它是不是 DOM） */
+  private host: HostMount<unknown>
+  /** 平台装配包（内核选路 / 默认插件预设也在这里） */
+  private platform: PlatformAdapters<unknown, unknown>
   private state: StateStore
   private env: EnvAdapter
   private config: PlayerConfig & { network: NetworkConfig; observability: 'full' | 'basic' }
@@ -110,7 +124,6 @@ export class Player {
   private firstFrameEmitted = false
   private loadTimeoutTimer: number | null = null
   private disposedSubs: Array<() => void> = []
-  private posterEl: HTMLImageElement | null = null // overlay 模式的封面图层（懒建）
   private progressSecond = -1 // 已同步到快照的整秒位置（节流用）
   private sizeWarned = false // 容器零尺寸告警只报一次，避免刷屏
   /**
@@ -143,37 +156,43 @@ export class Player {
   /** 本轮会话累计卡顿次数 */
   private stallCount = 0
 
-  constructor(config: PlayerConfig) {
-    // 1. 解析容器
-    const container = resolveContainer(config.container)
+  /**
+   * @param config 接入方配置
+   * @param platform **平台装配包**：媒体面 / 承载面 / 宿主环境 / 内核选路 / 默认插件预设。
+   *   缺省由 `createPlayer` 注入 Web 实现（`src/platform/web/`）。
+   *
+   *   为什么是**第二个参数**而不是让 core 自己 import：见 spec §3.10 与 `verify/layers.mjs`
+   *   —— core 不得在运行时依赖任何实现层，否则「换媒体面 / 换内核 / 换宿主」都要改 core。
+   */
+  constructor(config: PlayerConfig, platform: PlatformAdapters<unknown, unknown>) {
+    this.platform = platform
 
-    // 2. 配置三层合并
+    // 1. 配置三层合并
     const merged = deepMerge<PlayerConfig>(DEFAULT_CONFIG as PlayerConfig, config)
     merged.network = deepMerge<NetworkConfig>(DEFAULT_NETWORK_STRATEGY, config.network)
     this.config = merged as Player['config']
 
-    // 3. 建根容器 + video
-    this.root = document.createElement('div')
-    this.root.style.position = 'relative'
-    this.root.style.width = '100%'
-    this.root.style.height = '100%'
-    this.mediaProxy = new MediaProxy()
-    this.media = this.mediaProxy.el
-    this.media.style.position = 'absolute'
-    this.media.style.inset = '0'
-    this.media.style.width = '100%'
-    this.media.style.height = '100%'
-    this.root.appendChild(this.media)
-    container.appendChild(this.root)
+    // 2. 挂载：容器解析、根节点创建、media 挂进 DOM 全部由承载面负责（core 不碰 DOM）
+    this.surface = platform.media
+    this.host = platform.host
+    this.media = platform.media.raw as HTMLVideoElement
+    this.root = platform.host.root as HTMLElement
+    try {
+      platform.host.mount(config.container, platform.media.raw)
+    } catch (err) {
+      // 容器解析失败（如选择器不存在）：回收已创建的媒体面，保持与迁移前一致的「构造失败即无副作用」
+      platform.media.destroy()
+      throw err
+    }
 
-    // 4. env 适配器
-    this.env = config.env ?? new WebEnvAdapter()
+    // 3. env 适配器（接入方显式指定优先，其次平台默认）
+    this.env = config.env ?? platform.env
 
-    // 5. 状态快照初始值
+    // 4. 状态快照初始值
     const initial: PlayerState = {
       playing: false,
-      volume: this.mediaProxy.volume,
-      muted: this.mediaProxy.muted,
+      volume: this.surface.volume,
+      muted: this.surface.muted,
       qualities: [],
       currentQuality: null,
       // 会话真相由状态机在 onStateChange 里持续写入；此处与 StateMachine 的初值对齐
@@ -182,7 +201,7 @@ export class Player {
       currentTime: 0,
       duration: 0,
       fullscreen: false,
-      playbackRate: this.mediaProxy.playbackRate,
+      playbackRate: this.surface.playbackRate,
       capabilities: this.emptyCapabilities(),
     }
     this.state = new StateStore(initial)
@@ -243,7 +262,7 @@ export class Player {
       this.mediaPaused = false
       this.state.set({ playing: true })
       try {
-        await this.mediaProxy.play()
+        await this.surface.play()
       } catch (err) {
         // 被中断（AbortError）视为正常竞态；被拦截（NotAllowedError）回滚后静默。
         if (this.handlePlayRejection(err)) {
@@ -280,7 +299,7 @@ export class Player {
 
     this.currentPlayConfig = cfg
     const muted = cfg.muted ?? this.config.muted ?? false
-    this.mediaProxy.muted = muted
+    this.surface.muted = muted
     this.applyPoster(cfg.poster)
     // 新一轮起播：进度归零，等待 loadedmetadata/timeupdate 回填
     this.progressSecond = -1
@@ -321,7 +340,7 @@ export class Player {
 
   pause(): void {
     this.emitCommand('pause', 'before')
-    this.mediaProxy.pause()
+    this.surface.pause()
     // 显式暂停 = 用户意图转为「不播」，重连逻辑不应再把它还原为播放中
     this.playIntent = false
     // 乐观更新：浏览器 `pause` 事件是异步派发的，若只等事件，`getState().playing`
@@ -334,14 +353,14 @@ export class Player {
 
   mute(m: boolean): void {
     this.emitCommand('mute', 'before')
-    this.mediaProxy.muted = m
+    this.surface.muted = m
     this.state.set({ muted: m })
     this.emitCommand('mute', 'after', true)
   }
 
   setVolume(v: number): void {
     this.emitCommand('setVolume', 'before')
-    this.mediaProxy.volume = v
+    this.surface.volume = v
     this.state.set({ volume: v })
     this.emitCommand('setVolume', 'after', true)
   }
@@ -428,13 +447,13 @@ export class Player {
    */
   requestFullscreen(target?: Element): void {
     this.emitCommand('requestFullscreen', 'before')
-    this.mediaProxy.requestFullscreen(target)
+    this.surface.requestFullscreen(target)
     this.emitCommand('requestFullscreen', 'after', true)
   }
 
   exitFullscreen(): void {
     this.emitCommand('exitFullscreen', 'before')
-    this.mediaProxy.exitFullscreen()
+    this.surface.exitFullscreen()
     this.emitCommand('exitFullscreen', 'after', true)
   }
 
@@ -450,7 +469,7 @@ export class Player {
       this.emitCommand('seek', 'after', false)
       return
     }
-    const duration = this.media.duration
+    const duration = this.surface.duration
     if (!Number.isFinite(duration)) {
       logger.debug('[live-sdk] seek 在直播无限流上不生效（点播/重播态可用）')
       this.emitCommand('seek', 'after', false)
@@ -458,7 +477,7 @@ export class Player {
     }
     const upper = duration > 0 ? duration : time
     const target = Math.min(Math.max(time, 0), upper)
-    this.mediaProxy.seek(target)
+    this.surface.seek(target)
     // 乐观更新：`timeupdate` 是异步的（~4Hz），业务在 seek() 后同步读
     // getState().currentTime 会拿到旧值；此处先纠正快照与节流游标。
     this.progressSecond = Math.floor(target)
@@ -477,13 +496,13 @@ export class Player {
       return
     }
     try {
-      this.mediaProxy.playbackRate = rate
+      this.surface.playbackRate = rate
     } catch {
       logger.warn(`[live-sdk] 倍速入参非法，已忽略：${rate}`)
       this.emitCommand('setPlaybackRate', 'after', false)
       return
     }
-    this.state.set({ playbackRate: this.mediaProxy.playbackRate })
+    this.state.set({ playbackRate: this.surface.playbackRate })
     this.emitCommand('setPlaybackRate', 'after', true)
   }
 
@@ -777,7 +796,7 @@ export class Player {
   // ═══════════════ 直播状态轮询 ═══════════════
 
   pollLiveStatus(interval?: number): void {
-    const polling = this.plugins.get<LivePolling>('livePolling')
+    const polling = this.livePolling()
     const url = this.currentPlayConfig?.liveStatus
     if (!polling || !url) return
     polling.start(url, interval)
@@ -790,9 +809,9 @@ export class Player {
     this.destroyed = true
     // 全屏中销毁：先退出全屏再拆 DOM，否则部分浏览器会把页面卡在全屏态
     // （移除全屏元素虽通常触发自动退出，但不保证同步完成）。
-    if (this.mediaProxy.isFullscreen()) this.mediaProxy.exitFullscreen()
+    if (this.surface.isFullscreen()) this.surface.exitFullscreen()
     // 清理定时器
-    for (const t of this.timers) window.clearTimeout(t)
+    for (const t of this.timers) clearTimeout(t)
     this.timers.clear()
     this.clearLoadTimeout()
     // 解绑监听
@@ -804,9 +823,9 @@ export class Player {
     this.kernel?.destroy()
     this.kernel = null
     this.plugins.destroyAll()
-    this.mediaProxy.destroy()
-    this.destroyPosterEl()
-    this.root.remove()
+    // 媒体面先销毁（暂停 + 释放媒体资源），再由承载面拆掉根节点与封面图层
+    this.surface.destroy()
+    this.host.destroy()
     this.state.destroy()
     this.hooks.destroy()
     this.eventBus.removeAll()
@@ -836,6 +855,8 @@ export class Player {
     if (this.kernel) return this.kernel
     const Ctor = this.selectKernel(url)
     const kernel = new Ctor({
+      // 内核拿到的是**平台原生媒体句柄**（Web 即 HTMLVideoElement）——
+      // 这是 Kernel 契约既有的形状，本阶段未改（见 spec §3.10 的后续项）
       media: this.media,
       hlsConfig: this.config.hlsConfig,
       observability: this.config.observability,
@@ -846,19 +867,16 @@ export class Player {
     return kernel
   }
 
-  /** 内核选路 = f(源格式, 平台能力, 观测档位)，见 §7.2 */
-  private selectKernel(_url: string): KernelConstructor {
+  /**
+   * 内核选路：`= f(源格式, 平台能力, 观测档位)`（spec §7.2）。
+   *
+   * **默认内核的选择属于平台**：`HlsKernel` / `NativeKernel` 以及 `sniffer` 能力探测
+   * 全部搬到了 `src/platform/web/selectKernel.ts`（P0 解耦），core 只保留一条
+   * 平台无关的判断 —— **接入方显式指定 `config.kernel` 时优先**。
+   */
+  private selectKernel(url: string): KernelConstructor {
     if (this.config.kernel) return this.config.kernel
-    const obs = this.config.observability
-    if (obs === 'full') {
-      if (HlsKernel.isSupported()) return HlsKernel
-      return NativeKernel // 无 MSE（Safari <17.1）→ 原生 HLS，深度观测落 basic
-    }
-    // basic
-    if (canPlayNativeHLS(this.media)) return NativeKernel
-    if (canPlayNativeMP4(this.media)) return NativeKernel // 渐进式 MP4 直连
-    if (supportsMSE() && HlsKernel.isSupported()) return HlsKernel
-    throw new Error('平台不支持任何可用播放内核')
+    return this.platform.selectKernel(url, this.config.observability)
   }
 
   private emptyCapabilities(): KernelCapabilities {
@@ -919,10 +937,10 @@ export class Player {
   // ═══════════════ 内部：media 原生事件 ═══════════════
 
   private bindMediaEvents(): void {
-    const el = this.media
-    const on = (name: string, fn: EventListener) => {
-      el.addEventListener(name, fn)
-      this.disposedSubs.push(() => el.removeEventListener(name, fn))
+    // 媒体事件一律经 `MediaSurface.on` 订阅 —— core 不再写 `el.addEventListener`
+    // （否则等于把「媒体是 DOM 元素」写回 core；这条是平台接缝测试发现的）。
+    const on = (name: MediaEventName, fn: () => void) => {
+      this.disposedSubs.push(this.surface.on(name, fn))
     }
 
     on('loadedmetadata', () => {
@@ -934,7 +952,7 @@ export class Player {
     on('canplay', () => this.onFirstFrameSignal())
     on('timeupdate', () => this.syncProgress())
     on('durationchange', () => this.syncProgress())
-    // 缓冲水位：挂 `progress`（缓冲区间变化时由浏览器派发），而非 `timeupdate`。
+    // 缓冲水位：挂 `progress`（缓冲区间变化时由媒体设备派发），而非 `timeupdate`。
     // 派发本身由档位跨越判定节流，见 checkBufferLevel()。
     on('progress', () => this.checkBufferLevel())
     // `play` 与下面的 `playing` 是两件事：前者=请求被接受（尚未出画），后者=真的在播。
@@ -949,40 +967,34 @@ export class Player {
       this.stateMachine.transition('ended')
       this.emit(Events.ENDED)
     })
-    on('volumechange', () => this.state.set({ volume: this.media.volume, muted: this.media.muted }))
-    // 倍速也可能被外部（直接操作 media）改动：跟随同步并去重，避免重复渲染
+    on('volumechange', () => this.state.set({ volume: this.surface.volume, muted: this.surface.muted }))
+    // 倍速也可能被外部（直接操作媒体）改动：跟随同步并去重，避免重复渲染
     on('ratechange', () => {
-      const rate = this.media.playbackRate
+      const rate = this.surface.playbackRate
       if (rate !== this.state.get().playbackRate) this.state.set({ playbackRate: rate })
     })
     on('error', () => {
-      // 原生 media error（NativeKernel / 渐进式直连路径）。
-      // `<video>.error` 是 MediaError，其 `code` 是规范里的**定值枚举**、语义可靠 →
-      // 按 code 分派（详见 utils/errors.ts#mapMediaErrorCode）。
+      // 原生媒体错误（NativeKernel / 渐进式直连路径）。
+      // 错误码是规范里的**定值枚举**、语义可靠 → 按 code 分派
+      // （详见 utils/errors.ts#mapMediaErrorCode）。
       // 早期实现一律映射成 network_error，会把解码 / 格式类错误打进「接口与 CDN」，
       // 使接入方按错误码做的分类上报整体错位。
-      const mediaError = this.media.error
+      const mediaError = this.surface.error()
       const mapped = mapMediaErrorCode(mediaError?.code, mediaError?.message)
       if (!mapped) return // code=1：换源 / 销毁引发的中止，不是故障
       this.dispatchError(this.makeError(mapped.code, mediaError?.message || '媒体加载失败', mapped.fatal))
     })
 
     // —— 全屏状态同步 ——
-    // 标准 Fullscreen API 在 document 上派发；iOS 原生视频全屏走 video 私有事件，
-    // 且**不派发 fullscreenchange**。两条路径都要监听，否则 iOS 上全屏态永远不同步。
-    const onDoc = (name: string, fn: EventListener) => {
-      document.addEventListener(name, fn)
-      this.disposedSubs.push(() => document.removeEventListener(name, fn))
-    }
-    onDoc('fullscreenchange', () => this.syncFullscreen())
-    onDoc('webkitfullscreenchange', () => this.syncFullscreen())
-    on('webkitbeginfullscreen', () => this.syncFullscreen())
-    on('webkitendfullscreen', () => this.syncFullscreen())
+    // **两个来源在平台侧合一**：Web 的「`document` 上的标准/前缀 fullscreenchange」
+    // 与「iOS 原生视频全屏的 `webkitbegin/endfullscreen`（不派发 fullscreenchange）」。
+    // core 只认 `fullscreenchange` 一个事件名，也不必知道 `document` 的存在。
+    on('fullscreenchange', () => this.syncFullscreen())
   }
 
   /** 把全屏真实状态同步到快照（去重后写，避免重复事件驱动无意义的重渲染）。 */
   private syncFullscreen(): void {
-    const full = this.mediaProxy.isFullscreen()
+    const full = this.surface.isFullscreen()
     if (full !== this.state.get().fullscreen) this.state.set({ fullscreen: full })
   }
 
@@ -1063,7 +1075,7 @@ export class Player {
     this.emit(Events.STALLED)
     // 启动恢复定时器：超时 → 重连
     const timeout = this.resolveTunable(this.config.network.loadTimeout)
-    const timer = window.setTimeout(() => {
+    const timer = setTimeout(() => {
       if (this.stateMachine.current === 'stalled') {
         // 超时前再判一次近尾：解码器可能在等待期间才补完最后一帧
         if (this.isNearTail()) {
@@ -1085,15 +1097,14 @@ export class Player {
    * 容差取 max(0.5s, 最后区间长度的小比例)，兼顾正常结尾与异常流的时长偏差。
    */
   private isNearTail(tolerance = 0.5): boolean {
-    const el = this.media
-    const duration = el.duration
+    const duration = this.surface.duration
     if (!Number.isFinite(duration) || duration <= 0) return false // 直播无限流
-    const buffered = el.buffered
-    if (!buffered || buffered.length === 0) return false
-    const bufferEnd = buffered.end(buffered.length - 1)
+    const buffers = this.surface.buffered()
+    if (buffers.length === 0) return false
+    const bufferEnd = buffers[buffers.length - 1]![1]
     // buffer 已到末尾（允许极小误差）+ 播放点也贴近末尾
     const bufferAtEnd = duration - bufferEnd <= tolerance
-    const playAtEnd = duration - el.currentTime <= Math.max(tolerance, 1)
+    const playAtEnd = duration - this.surface.currentTime <= Math.max(tolerance, 1)
     return bufferAtEnd && playAtEnd
   }
 
@@ -1152,13 +1163,12 @@ export class Player {
    */
   private warnIfZeroSize(): void {
     if (this.sizeWarned || this.destroyed) return
-    const size = readElementSize(this.root)
+    const size = this.host.measure() // 平台测量；测不到返回 null（与「真的是 0」区分）
     if (!size || !isZeroSized(size)) return
     this.sizeWarned = true
-    logger.warn(
-      `容器尺寸为 0（${size.width}×${size.height}），播放器不会有可见画面。` +
-        `请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。`,
-    )
+    // 排查提示是**平台相关**的（Web 给 CSS 例子，其他宿主写法不同）→ 由平台包提供
+    const hint = this.platform.zeroSizeHint ? ` ${this.platform.zeroSizeHint}` : ''
+    logger.warn(`容器尺寸为 0（${size.width}×${size.height}），播放器不会有可见画面。${hint}`)
   }
 
   // ═══════════════ 内部：封面图层（posterMode） ═══════════════
@@ -1171,49 +1181,23 @@ export class Player {
    */
   private applyPoster(poster?: string): void {
     if (this.config.posterMode !== 'overlay') {
-      this.mediaProxy.poster = poster
+      this.surface.poster = poster
       return
     }
     // overlay 模式不写 video.poster，避免与图层重复呈现
     if (!poster) {
-      this.hidePosterOverlay()
+      this.host.hidePosterOverlay()
       return
     }
-    const el = this.ensurePosterEl()
-    el.src = poster
-    el.style.display = 'block'
+    // 图层怎么建（Web 用 `<img>`，其他宿主用自家组件）由承载面决定 —— core 不碰 DOM
+    this.host.showPosterOverlay(poster)
     // 注意：不要重置 firstFrameEmitted —— 它还兼作 plugins.readyAll()/kernelReady 的一次性闸门。
     // 二次起播时 emitFirstFrame 不再触发，改由 onMediaPlaying（playing 事件，每次起播都会派发）兜底隐藏。
   }
 
-  private ensurePosterEl(): HTMLImageElement {
-    if (this.posterEl) return this.posterEl
-    const el = document.createElement('img')
-    el.className = 'live-sdk-poster'
-    Object.assign(el.style, {
-      position: 'absolute',
-      inset: '0',
-      width: '100%',
-      height: '100%',
-      objectFit: 'cover',
-      display: 'none',
-      // 低于默认控件层（UIMount 的 controls bar 为 z-index:10），不遮挡操作
-      zIndex: '1',
-    })
-    el.setAttribute('alt', '')
-    this.root.appendChild(el)
-    this.posterEl = el
-    return el
-  }
-
   /** 隐藏封面图层（幂等）。首帧呈现、进入播放时调用。 */
   private hidePosterOverlay(): void {
-    if (this.posterEl) this.posterEl.style.display = 'none'
-  }
-
-  private destroyPosterEl(): void {
-    this.posterEl?.remove()
-    this.posterEl = null
+    this.host.hidePosterOverlay()
   }
 
   // ═══════════════ 内部：播放进度同步 ═══════════════
@@ -1226,9 +1210,9 @@ export class Player {
    * 快照定位是低频字段（StateStore 注释），逐帧精度请读 `player.media.currentTime`。
    */
   private syncProgress(): void {
-    const t = this.media.currentTime || 0
+    const t = this.surface.currentTime || 0
     const second = Math.floor(t)
-    const raw = this.media.duration
+    const raw = this.surface.duration
     // 直播：duration 恒为 Infinity（HTMLMediaElement 规范），如实透传；
     // 元数据未就绪：NaN；老浏览器/极简 DOM 替身可能为 undefined → 统一归一为 0，
     // 避免业务侧渲染出 NaN/undefined。
@@ -1270,7 +1254,7 @@ export class Player {
     // （<video> 从未进入 paused，只是 buffer 被替换），单等事件会导致按钮卡在「播放」。
     this.mediaPaused = false
     this.state.set({ playing: true })
-    const p = this.mediaProxy.play()
+    const p = this.surface.play()
     if (!p || typeof p.catch !== 'function') return
     p.catch((err) => {
       if (this.handlePlayRejection(err)) return
@@ -1393,7 +1377,7 @@ export class Player {
     // 消费方按 `data.diagnostic` 取会拿到 undefined，只能靠推断去读一堆平铺字段。
     this.dispatchReport({ type: 'event', code: 'retry', level: 'warn', data: { message, diagnostic }, time: Date.now() })
     this.stateMachine.transition('retry')
-    const timer = window.setTimeout(() => this.reload(code, diagnostic), delay)
+    const timer = setTimeout(() => this.reload(code, diagnostic), delay)
     this.addTimer(timer)
   }
 
@@ -1456,7 +1440,7 @@ export class Player {
       rtt: conn?.rtt,
       bufferBehind: Number(buffered.behind.toFixed(2)),
       bufferRemaining: Number(buffered.remaining.toFixed(2)),
-      currentTime: Number((this.media.currentTime || 0).toFixed(2)),
+      currentTime: Number((this.surface.currentTime || 0).toFixed(2)),
       retryCount: this.retryCount,
       delay,
       errorCode,
@@ -1520,7 +1504,7 @@ export class Player {
 
   private onBackground(): void {
     // 直播切后台：暂停心跳/轮询（省电）；可选静音。此处在 base 版仅暂停轮询。
-    this.plugins.get<LivePolling>('livePolling')?.stop()
+    this.livePolling()?.stop()
   }
 
   private onForeground(): void {
@@ -1528,7 +1512,7 @@ export class Player {
     if (this.stateMachine.current === 'error' || this.stateMachine.current === 'stalled') {
       this.recover(ERROR_CODE.NETWORK_ERROR, '回前台恢复')
     } else if (this.currentPlayConfig?.liveStatus) {
-      this.plugins.get<LivePolling>('livePolling')?.start(this.currentPlayConfig.liveStatus)
+      this.livePolling()?.start(this.currentPlayConfig.liveStatus)
     }
   }
 
@@ -1603,19 +1587,37 @@ export class Player {
   private startLivePollingIfNeeded(): void {
     const url = this.currentPlayConfig?.liveStatus
     if (!url) return
-    this.plugins.get<LivePolling>('livePolling')?.start(url)
+    this.livePolling()?.start(url)
   }
 
   // ═══════════════ 内部：预设 / 上报 / 定时器 ═══════════════
 
+  /**
+   * 取直播状态轮询插件（按名字装配、按行为形状使用）。
+   *
+   * 这里有一次**显式收窄**：`PluginManager.get` 的泛型上界是 `Plugin`（完整插件生命周期），
+   * 而 core 只需要它的两个行为方法 —— 用 `LivePollingLike` 表达「core 对该插件的全部了解」。
+   * 代价是一次 cast，换来 core 不必 `import` 实现层的 `LivePolling`（见 `verify/layers.mjs`）。
+   */
+  private livePolling(): LivePollingLike | undefined {
+    return this.plugins.get('livePolling') as unknown as LivePollingLike | undefined
+  }
+
+  /**
+   * 应用插件预设（`config.preset`）。
+   *
+   * **具名预设的具体成员属于平台**：`live` / `vod` 各含哪些插件由平台包提供
+   * （Web: `ConsoleReporter` + `LivePolling`）。core 只负责「按名字取列表 + 过滤 ignores + 装配」，
+   * 因此这里不再 `import` 任何插件类。
+   */
   private applyPreset(): void {
     const preset = this.config.preset
     const ignores = this.config.ignores ?? []
-    let list: Array<{ new (): unknown; pluginName: string }> = []
+    let list: PluginPresetEntry[] = []
     if (Array.isArray(preset)) {
-      list = preset as unknown as Array<{ new (): unknown; pluginName: string }>
-    } else if (typeof preset === 'string' && PRESETS[preset]) {
-      list = PRESETS[preset]
+      list = preset as unknown as PluginPresetEntry[]
+    } else if (typeof preset === 'string' && this.platform.presets[preset]) {
+      list = this.platform.presets[preset]
     }
     for (const Ctor of list) {
       if (ignores.includes(Ctor.pluginName)) continue
@@ -1637,7 +1639,7 @@ export class Player {
   private startLoadTimeout(): void {
     this.clearLoadTimeout()
     const timeout = this.resolveTunable(this.config.network.loadTimeout)
-    const timer = window.setTimeout(() => {
+    const timer = setTimeout(() => {
       if (this.stateMachine.current === 'loading') {
         this.dispatchError(this.makeError(ERROR_CODE.LOAD_TIMEOUT, `加载超时（${timeout}ms）`, false))
       }
@@ -1648,7 +1650,7 @@ export class Player {
 
   private clearLoadTimeout(): void {
     if (this.loadTimeoutTimer !== null) {
-      window.clearTimeout(this.loadTimeoutTimer)
+      clearTimeout(this.loadTimeoutTimer)
       this.timers.delete(this.loadTimeoutTimer)
       this.loadTimeoutTimer = null
     }

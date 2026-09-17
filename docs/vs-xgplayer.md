@@ -264,7 +264,7 @@
 |---|---|---|
 | **仓库形态** | 单包（`live-sdk/`），内部按 `src/{core,kernel,ui,adapters,plugins,reporter,env,utils}` 分层 | **Yarn workspaces monorepo**，`packages/*` 16 个独立发布包 |
 | **包数量** | 1 个 npm 包（多入口：`.` / `./ui` / `./react` / `./vue`） | 16 个包，独立版本、独立发布 |
-| **分层** | `src/` 下 **7 个目录共 30 个文件**：core / kernel / ui / adapters / **plugins** / env / utils。目录按**边界**划分（装配机制 / 发布入口），不是按代码归类 —— 见 §1.0 | core(`xgplayer`) / 各协议内核 / `streaming-shared` / `transmuxer` / 功能插件包 |
+| **分层** | `src/` 下 8 个目录：core / **platform(web)** / kernel / env / plugins / ui / adapters / utils。**core 是平台无关层**（不依赖任何实现），平台实现集中于 `platform/web/` —— 由 `verify/layers.mjs` 强制（见 spec §3.9） | core(`xgplayer`) / 各协议内核 / `streaming-shared` / `transmuxer` / 功能插件包 |
 | **构建** | Vite + esbuild + tsc（声明文件），ESM + UMD，**`minify: false`**（可读性优先，压缩交给使用方打包器） | 自研 `libd` CLI（rollup + babel + dts-bundle-generator），ESM + UMD + legacy |
 | **类型** | 原生 TypeScript | JavaScript + JSDoc（`tsconfig` 仅做检查） |
 | **Lint** | **未引入 ESLint / Prettier**（有意）——静态保障由**两道编译期证明**承担：公开 API 面契约（`verify/tsconfig.json`）+ 事件活性普查。二者覆盖「契约形状」与「事件活性」，**不覆盖代码风格** | Biome + husky + lint-staged |

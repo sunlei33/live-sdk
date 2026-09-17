@@ -1,10 +1,19 @@
 /**
- * MediaProxy：抽象原生 <video>，抹平浏览器差异（内联播放 / 全屏 / 属性）。
- * 内核创建并持有 video（创建权不开放给接入方），暴露 el 供 hls.js 挂载。
+ * Web 媒体面实现：抽象原生 `<video>`，抹平浏览器差异（内联播放 / 全屏 / 属性）。
+ *
+ * 由 `core/MediaProxy` 迁移而来（P1）。**迁移的内容不变，只多两件事**：
+ * - 实现 `MediaSurface` 契约（新增 `raw` 与 `onFullscreenChange`）；
+ * - 把「监听 `document` 的 fullscreenchange」从 `Player` 收进来 ——
+ *   否则 core 里仍会残留 DOM 全局引用，等于没解耦干净。
+ *
+ * 归属说明：它是 **Web 平台的实现**，不再属于 `core`。
+ * 其他宿主（小程序 / 原生播放器）写自己的 `MediaSurface`，core 不需要改。
  */
-import { isPlayerFullscreen, resolveFullscreenPlan, type FullscreenTarget, type FullscreenVideo } from '../utils/fullscreen'
+import type { MediaEventName, MediaSurface } from '../../types'
+import { readBuffers } from '../../utils/buffer'
+import { isPlayerFullscreen, resolveFullscreenPlan, type FullscreenTarget, type FullscreenVideo } from '../../utils/fullscreen'
 
-export class MediaProxy {
+export class WebMediaSurface implements MediaSurface<HTMLVideoElement> {
   readonly el: HTMLVideoElement
 
   constructor() {
@@ -15,6 +24,11 @@ export class MediaProxy {
     el.setAttribute('x5-video-player-type', 'h5')
     el.setAttribute('x5-video-player-fullscreen', 'true')
     this.el = el
+  }
+
+  /** 契约要求的平台原生句柄（供 `player.media` 与 Web 内核使用）。 */
+  get raw(): HTMLVideoElement {
+    return this.el
   }
 
   set src(url: string) {
@@ -32,6 +46,10 @@ export class MediaProxy {
     this.el.defaultMuted = m
   }
 
+  get muted(): boolean {
+    return this.el.muted
+  }
+
   /** 当前倍速（读回真实生效值，浏览器可能对超范围入参做钳制） */
   get playbackRate(): number {
     return this.el.playbackRate
@@ -39,6 +57,14 @@ export class MediaProxy {
 
   set playbackRate(rate: number) {
     this.el.playbackRate = rate
+  }
+
+  get currentTime(): number {
+    return this.el.currentTime
+  }
+
+  get duration(): number {
+    return this.el.duration
   }
 
   /** 定位到指定时间（秒）。调用方负责直播/点播的语义判定与范围钳制。 */
@@ -55,10 +81,6 @@ export class MediaProxy {
   }
   set volume(v: number) {
     this.el.volume = v
-  }
-
-  get muted(): boolean {
-    return this.el.muted
   }
 
   get paused(): boolean {
@@ -83,8 +105,8 @@ export class MediaProxy {
    * 选路与 iOS 回退见 `resolveFullscreenPlan`：iOS Safari 不支持普通元素全屏时
    * 自动回退到原生视频全屏（控件不可见，但至少能全屏）。
    */
-  requestFullscreen(target?: Element): void {
-    const plan = resolveFullscreenPlan(target, this.el)
+  requestFullscreen(target?: unknown): void {
+    const plan = resolveFullscreenPlan(target as Element | undefined, this.el)
     try {
       switch (plan.api) {
         case 'webkitEnterFullscreen':
@@ -156,6 +178,44 @@ export class MediaProxy {
    */
   isFullscreen(): boolean {
     return isPlayerFullscreen(this.el, this.getFullscreenElement())
+  }
+
+  /**
+   * 订阅媒体设备事件（`MediaSurface.on`）。
+   *
+   * Web 侧的特殊之处只有一个：**`fullscreenchange` 要把两个来源合一** ——
+   * 标准 Fullscreen API 在 `document` 上派发（含 webkit 前缀事件名），
+   * 而 iOS 原生视频全屏走 `<video>` 私有事件且**不派发 fullscreenchange**。
+   * 合一之后 core 只认一个事件名，不必知道这些差异。
+   */
+  on(event: MediaEventName, cb: (data?: unknown) => void): () => void {
+    const handler = (): void => cb()
+    if (event === 'fullscreenchange') {
+      this.el.addEventListener('webkitbeginfullscreen', handler)
+      this.el.addEventListener('webkitendfullscreen', handler)
+      document.addEventListener('fullscreenchange', handler)
+      document.addEventListener('webkitfullscreenchange', handler)
+      return () => {
+        this.el.removeEventListener('webkitbeginfullscreen', handler)
+        this.el.removeEventListener('webkitendfullscreen', handler)
+        document.removeEventListener('fullscreenchange', handler)
+        document.removeEventListener('webkitfullscreenchange', handler)
+      }
+    }
+    this.el.addEventListener(event, handler)
+    return () => this.el.removeEventListener(event, handler)
+  }
+
+  /** 媒体错误读数（Web 来自 `MediaError`：1 中止 / 2 网络 / 3 解码 / 4 不支持） */
+  error(): { code?: number; message?: string } | null {
+    const e = this.el.error
+    if (!e) return null
+    return { code: e.code, message: e.message }
+  }
+
+  /** 已缓冲区间（读 `<video>.buffered`；共用 utils/buffer 的读取逻辑） */
+  buffered(): Array<[number, number]> {
+    return readBuffers(this.el.buffered)
   }
 
   destroy(): void {

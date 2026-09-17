@@ -144,11 +144,16 @@ export interface KernelOptions {
   onEvent: (event: string, data?: unknown) => void
 }
 
-// ───────────────────────────── 宿主环境适配 ─────────────────────────────
+// ───────────────────────────── 平台契约（宿主环境 / 媒体面 / 承载面） ─────────────────────────────
+//
+// 这三组契约是**平台无关的接缝**：`core` 只依赖它们，不依赖任何具体实现。
+// `src/platform/web/` 是 Web 的实现，将来接其他宿主（小程序 / 原生播放器）
+// 只需再写一份实现 + 一个装配入口，**不必改 core**（由 `verify/layers.mjs` 保证）。
 
 export type NetworkQuality = 'good' | 'fair' | 'poor' | 'offline'
 export type VisibilityState = 'foreground' | 'background'
 
+/** 宿主环境状态（前台/后台、网络），语义与注入方式见 spec §3.8。 */
 export interface EnvAdapter {
   getVisibility(): VisibilityState
   onVisibilityChange(cb: (v: VisibilityState) => void): () => void
@@ -156,6 +161,144 @@ export interface EnvAdapter {
   onNetworkChange(cb: (online: boolean) => void): () => void
   getNetworkQuality?(): NetworkQuality
   onNetworkQualityChange?(cb: (q: NetworkQuality) => void): () => void
+}
+
+/**
+ * 媒体设备事件名（core 只订阅这些）。
+ *
+ * 词汇沿用 `HTMLMediaElement` 的既有命名（`play` / `timeupdate` / `waiting` …），
+ * 因为它是这套语义的事实标准，换宿主时平台实现负责**把自家事件映射到这些名字**。
+ * `fullscreenchange` 是唯一的抽象项：Web 实现要同时转发「`document` 上的标准/前缀事件」
+ * 与「iOS 原生视频全屏的 `webkitbegin/endfullscreen`」—— 两个来源在平台侧合一，
+ * core 只认一个事件名（见 `MediaSurface.on`）。
+ */
+export type MediaEventName =
+  | 'loadedmetadata'
+  | 'loadeddata'
+  | 'canplay'
+  | 'timeupdate'
+  | 'durationchange'
+  | 'progress'
+  | 'play'
+  | 'playing'
+  | 'pause'
+  | 'waiting'
+  | 'stalled'
+  | 'ended'
+  | 'volumechange'
+  | 'ratechange'
+  | 'error'
+  | 'fullscreenchange'
+
+/** 媒体错误读数（平台中立：Web 由 `MediaError` 归一而来，其他宿主给自家错误码） */
+export interface MediaErrorInfo {
+  /** 规范化的错误码（Web 为 `MediaError.code` 语义：1 中止 / 2 网络 / 3 解码 / 4 不支持） */
+  code?: number
+  message?: string
+}
+
+/**
+ * **媒体设备面：怎么播。**
+ *
+ * 存在的意义：`core` 不该知道「媒体」是 `<video>` 元素、还是小程序的 `<video>` 组件、
+ * 还是原生播放器句柄。`raw` 是平台原生句柄，**core 不解释它**（只在对外暴露
+ * `player.media` 时做一次显式收窄，见 `Player` 的类型策略说明）。
+ *
+ * 与 `HostMount` 的分界：本契约只管**播放能力、媒体状态与媒体事件**，
+ * 不管「放在哪、多大、封面怎么盖」。
+ */
+export interface MediaSurface<TMedia = unknown> {
+  /** 平台原生媒体句柄（Web: `HTMLVideoElement`）。 */
+  readonly raw: TMedia
+  play(): Promise<void>
+  pause(): void
+  seek(time: number): void
+  src?: string
+  /** 原生封面（`posterMode: 'native'`）。overlay 模式由 `HostMount` 负责，不走这里。 */
+  poster?: string
+  muted: boolean
+  volume: number
+  /** 读回真实生效值（浏览器可能对超范围入参做钳制）。 */
+  playbackRate: number
+  readonly paused: boolean
+  readonly currentTime: number
+  readonly duration: number
+  /** 当前媒体错误（无则 `null`）。core 据此做 `MediaError.code` 语义的分派。 */
+  error(): MediaErrorInfo | null
+  /**
+   * 已缓冲区间（秒），`[[start, end], ...]`。
+   * 「近尾判定」需要它；平台拿不到时返回空数组（与「无缓冲」同义，调用方按空处理）。
+   */
+  buffered(): Array<[number, number]>
+  /** 请求全屏；`target` 为容器时做容器级全屏（缺省全屏媒体本身）。 */
+  requestFullscreen(target?: unknown): void
+  exitFullscreen(): void
+  isFullscreen(): boolean
+  /**
+   * 订阅媒体设备事件。**事件订阅必须在契约里**：否则 core 得写 `el.addEventListener`，
+   * 等于把「媒体是个 DOM 元素」这一假设写回 core（本仓的接缝测试就是这么发现的）。
+   */
+  on(event: MediaEventName, cb: (data?: unknown) => void): () => void
+  destroy(): void
+}
+
+/**
+ * **宿主承载面：放在哪、多大、封面怎么盖。**
+ *
+ * 把 media 挂进宿主容器，并负责尺寸测量与封面图层——这三件事的**实现方式完全取决于宿主**
+ * （Web 是 DOM 节点与样式；小程序是组件树与 `setData`）。
+ */
+export interface HostMount<TRoot = unknown> {
+  /** UI 挂载锚点（Web: `HTMLDivElement`）。 */
+  readonly root: TRoot
+  /**
+   * 把媒体挂进容器。`container` 的类型由平台自行解释
+   * （Web 支持 `string | HTMLElement`，含选择器解析）。
+   */
+  mount(container: unknown, media: unknown): void
+  /**
+   * 测量承载区尺寸。**测不到返回 `null`**，与「真的是 0」严格区分 ——
+   * 零尺寸告警据此判定，把「测不到」当成 0 会在测试与 SSR 场景满屏误报。
+   */
+  measure(): { width: number; height: number } | null
+  /** 显示 / 隐藏封面图层（`posterMode: 'overlay'`）。 */
+  showPosterOverlay(src: string): void
+  hidePosterOverlay(): void
+  destroy(): void
+}
+
+/** 预设中的插件条目（结构类型：core 只需「能 new 出带 pluginName 的插件」）。 */
+export interface PluginPresetEntry {
+  new (): unknown
+  pluginName: string
+}
+
+/** 具名预设 → 插件列表（如 `live` / `vod`）。 */
+export type PluginPresets = Record<string, PluginPresetEntry[]>
+
+/**
+ * **平台装配包**：`core` 从这里一次性拿到全部平台实现。
+ *
+ * 这是 P0「解耦」的落点 —— 在此之前 `Player` 直接 `import` 了 `HlsKernel` /
+ * `WebEnvAdapter` / `ConsoleReporter` / `LivePolling` / `MediaProxy`，
+ * 使 core 在运行时反向依赖实现层（由 `verify/layers.mjs` 拦截）。
+ */
+export interface PlatformAdapters<TMedia = unknown, TRoot = unknown> {
+  media: MediaSurface<TMedia>
+  host: HostMount<TRoot>
+  env: EnvAdapter
+  /**
+   * 内核选路：**默认内核的选择属于平台**（Web 依 sniffer 能力探测）
+   * —— 这正是 core 不再 `import HlsKernel` 后必须留下的钩子。
+   * 接入方显式指定 `PlayerConfig.kernel` 时优先级更高，由 core 先判。
+   */
+  selectKernel(url: string, observability: Observability): KernelConstructor
+  presets: PluginPresets
+  /**
+   * 零尺寸告警时附带的排查提示（**平台相关**：Web 给 CSS 例子，别的宿主写法不同）。
+   * 放在平台包里，是为了让 core 的告警文案不含任何平台假设。
+   */
+  zeroSizeHint?: string
 }
 
 // ───────────────────────────── 起播输入 ─────────────────────────────

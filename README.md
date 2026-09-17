@@ -606,7 +606,7 @@ player.registerPlugin(SentryReporter, { sentry: Sentry })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 52 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 53 条用例，格式：目标 / 配置 / 交互 / 预期
 - [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
@@ -645,12 +645,19 @@ npm run verify:all    # 全链路：单测 → 构建 → 冒烟 → E2E
 
 E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重、近尾 `ended` 判定、Pointer Events、销毁清理），通过注入 `MockKernel` 驱动异常分支，不依赖真实直播流，因此**不依赖网络**。选 Playwright 的关键理由之一是它**自带 WebKit**——这是唯一能覆盖 Safari 原生 HLS 回退路径（`NativeKernel`）的引擎。
 
-> 已知 flaky：**本地全量跑**（6 worker、`retries: 0`）时「断流恢复」的时序断言偶发失败 —— 实测 2 次全量跑各失败 1 例，而同用例隔离运行 `--repeat-each=3` 为 6/6、复跑全量 18/18。属并行下的时序敏感，与代码改动无关。CI 用 `workers: 1` + `retries: 2`（见 `playwright.config.ts`），不受影响；定位方式见技术实现档案 §8.10。
+> **已知 flaky（已查明成因，非断言问题）**：**本地全量跑**（6 worker、`retries: 0`）偶发 1 例失败，
+> 报错固定为 `browserContext.close: EPERM: operation not permitted ... traces/*.network` ——
+> 即 Playwright **写 trace 产物时被系统拒绝**（并发写同一 `test-results/.playwright-artifacts-*`）。
+> 每次失败的用例**都不同**、且隔离运行全部通过（实测 5 次全量跑：失败 1~3 例不等、用例各异，
+> 而所有失败详情**无一例外**都是 `browserContext.close: EPERM`）。
+> 清 `test-results/` 可降低概率但**不能根除**；`--workers=1` 与 CI 的 `workers: 1` + `retries: 2` 可规避。
+> 详见技术实现档案 §8.11。
 
-`npm run verify` 里还有四道**静态门**，专门拦「声明了、导出了，但其实没接线 / 没人用 / 没打进包」这类静态检查拦不住的失效：
+`npm run verify` 里还有五道**静态门**，专门拦「声明了、导出了，但其实没接线 / 没人用 / 没打进包 / 依赖越层」这类静态检查拦不住的失效：
 
 | 门 | 拦什么 | 加它的原因 |
 |---|---|---|
+| `verify/layers.mjs` 分层依赖 | 跨层 import 必须符合 spec §3.9 的矩阵（**core 不得依赖实现层**）；core 内不得出现 `document.`/`window.`/`navigator.`；core 不得依赖「读平台」的 utils | `core/Player.ts` 曾直接 `import` 内核 / env / 默认插件 / 媒体面 —— 于是「换媒体面、换内核、换宿主」三件事**每一件都要改 core** |
 | `verify/events.mjs` 事件活性 | 每个 `Events` 枚举成员必须至少有一个真实 `emit` 派发点，**零派发即构建失败** | 「`on()` 注册会成功、但永不触发」的静默失效，类型校验、冒烟、E2E、单测**都拦不住**（详见技术实现档案 §9） |
 | `verify/exports.mjs` 公开面形状 | 顶层导出 / `sniffer` 成员 / 枚举与常量内容与清单**精确集合比对**，缺失与多余都失败 | 原实现只问「名字在不在」，于是**成员级的删除/改名完全不被拦住** |
 | `verify/surface.mjs` 公开面活性 | 清单里每个公开名在 `src/` 必须有消费者，或有测试覆盖；两者皆无须登记豁免并写理由 | `sniffer` 曾有 5 个函数零引用零测试、占该文件 51%，一路活到 0.6.0 才被人工发现（随 0.6.0 删除） |
@@ -1266,7 +1273,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 52 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 53 cases in the format: goal / config / interaction / expectation
 - [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development
@@ -1306,14 +1313,15 @@ npm run verify:all    # full chain: unit tests → build → smoke → E2E
 
 E2E covers the cross-layer chain "kernel → Player → UI" (reconnection and de-duplication, near-tail `ended` detection, Pointer Events, destroy cleanup). It drives the failure branches by injecting a `MockKernel` rather than depending on a real live stream, so it **needs no network**. One key reason for choosing Playwright is that it **ships WebKit** — the only engine that can cover Safari's native HLS fallback path (`NativeKernel`).
 
-> Known flake: in **local full runs** (6 workers, `retries: 0`) the timing assertions in the "stream interruption recovery" spec fail intermittently — observed twice (1 failure each), while the same spec passed 6/6 with `--repeat-each=3` in isolation and the full suite passed 18/18 on a re-run. It is parallelism/timing sensitivity, unrelated to code changes. CI uses `workers: 1` + `retries: 2` (see `playwright.config.ts`) and is unaffected; see the implementation dossier §8.10.
+> **Known flake (root cause identified — not an assertion problem)**: in **local full runs** (6 workers, `retries: 0`) one spec fails intermittently with a fixed error: `browserContext.close: EPERM: operation not permitted ... traces/*.network` — i.e. Playwright **cannot write its trace artifact** (concurrent writes into `test-results/.playwright-artifacts-*`). The failing spec is different every run and every spec passes in isolation — and **every** failure detail is `browserContext.close: EPERM` (observed across 5 full runs: 1–3 failures each, all different, all EPERM). Clearing `test-results/` reduces but does not eliminate it; use `--workers=1` locally. CI's `workers: 1` + `retries: 2` is unaffected; see the implementation dossier §8.11.
 
 `npm run verify` also runs an **events liveness census** (`verify/events.mjs`): it counts the actual `emit` sites for every `Events` enum member across `src/`, and **fails the build on zero dispatch sites**. It exists because silent failures of the form "declared, exported, `on()` succeeds, but never fires" slip past type checks, smoke tests, E2E and unit tests alike (see the implementation dossier §9).
 
-Three more static gates guard adjacent blind spots:
+Four more static gates guard adjacent blind spots:
 
 | Gate | What it blocks | Why it exists |
 |---|---|---|
+| `verify/layers.mjs` layering | cross-layer imports must match the matrix in spec §3.9 (**core may not depend on implementation layers**); no DOM globals inside `core`; `core` may not use platform-reading utils | `core/Player.ts` used to import the kernel / env / default plugins / media surface directly — so switching media surface, kernel or host **all required touching core** |
 | `verify/exports.mjs` public-surface shape | exact set comparison of top-level exports / `sniffer` members / enum members against the manifest — both **missing and extra** names fail | the previous version only asked "is the name present", so member-level deletions and renames were never caught |
 | `verify/surface.mjs` public-surface liveness | every name in the manifest must have a consumer in `src/` or test coverage; otherwise it must be registered in an exemption list with a written reason | `sniffer` had 5 zero-reference, zero-test functions (51% of the file) that survived until 0.6.0 |
 | `verify/artifacts.mjs` artifact hygiene | every `dist/**/*.d.ts` must map to a `src/**/*.ts`; every `package.json` `exports` target must exist; every `dist/*.es.js` must be referenced by `exports` | nothing in the build pipeline cleans `dist`, so deleted/renamed sources leave orphan declarations — and `npm pack` packs exactly what is on disk |

@@ -737,6 +737,41 @@
 
 ---
 
+## 十六、平台契约与自定义平台（P0/P1 解耦改造）
+
+### US-51 自实现平台接入（非 DOM 宿主 / 自研媒体面）
+
+- **目标**：把「媒体面」「宿主承载」「宿主环境」三件事都换成自己的实现，**不改 SDK 源码** ——
+  用于非 DOM 宿主（小程序 / 原生播放器容器）或自研播放器。
+- **配置**：实现三组契约后自行装配；`createPlayer` 内部即「Web 平台包 + core」的默认装配形态。
+  ```ts
+  import { Player } from '@fancaf/live-sdk'
+  import type { MediaSurface, HostMount, EnvAdapter, PlatformAdapters } from '@fancaf/live-sdk'
+
+  const media: MediaSurface<MyHandle> = { /* play/pause/seek/muted/error/buffered/on/destroy … */ }
+  const host: HostMount<MyRoot>    = { /* mount/measure/showPosterOverlay/destroy … */ }
+  const env: EnvAdapter            = { /* getVisibility/onVisibilityChange/isOnline … */ }
+  const platform: PlatformAdapters<MyHandle, MyRoot> = {
+    media, host, env,
+    selectKernel: (url, observability) => MyKernel,   // 默认内核的选择属于平台
+    presets: {},                                      // 默认插件由平台给出
+  }
+  const player = new Player({ container: myContainer, url }, platform)
+  ```
+- **交互**：按上面构造；调用 `play()` / 命令 / 订阅事件 / `destroy()`。
+- **预期**：
+  1. **无需 `document` / `window`**：整条链路（起播、命令、事件、进度、销毁）都能跑通 —— 由 `test/platform-seam.test.ts` 以「假媒体面 + 假承载面」证明。
+  2. 命令落到**你实现的**媒体面（`play` / `pause` / `seek` / `muted` / `volume` / 全屏），状态快照随之更新。
+  3. 媒体事件由**你实现的** `MediaSurface.on(event, cb)` 上抛，core 只认 `MediaEventName` 那一组名字。
+  4. 零尺寸告警读 `HostMount.measure()`：**返回 `null`（测不到）不告警**，返回 0 尺寸才告警；提示文案由 `zeroSizeHint` 提供（平台相关）。
+  5. 封面图层走 `HostMount.showPosterOverlay/hidePosterOverlay`，SDK 不会自己去建 DOM 节点。
+  6. 容器解析（`string` → 元素）由**你的** `HostMount.mount` 负责；解析失败抛错时 SDK 会回收媒体面，不留副作用。
+  7. 依赖方向由 `verify/layers.mjs` 强制：**core 不会反向依赖任何实现层** —— 这也是「换平台不必改 core」的机器保证。
+  8. **已知边界**：`player.media` / `player.root` 的类型仍声明为 Web 类型（`HTMLVideoElement` / `HTMLElement`），
+     非 Web 宿主需自行 `as` 收窄；完全类型中立（泛型放宽）尚未做，见 spec §3.9。
+
+---
+
 ## 附录：验收环境建议
 | 项 | 建议 |
 |---|---|

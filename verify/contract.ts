@@ -3,7 +3,7 @@
  * （web-default / react-custom / app-webview），逐字验证 SDK 暴露的 API 面与默认值。
  * 本文件若通过 `tsc --noEmit`，即证明 SDK 满足 skill 所承诺的接入契约。
  */
-import { createPlayer, BasePlugin, Events, ERROR_CODE, ERROR_DOMAIN, COMMAND_NAMES, errorDomainOf, readElementSize, isZeroSized, LivePolling, LIVE_STATUS_ERROR_EVENT, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
+import { createPlayer, BasePlugin, Events, ERROR_CODE, ERROR_DOMAIN, COMMAND_NAMES, errorDomainOf, readElementSize, isZeroSized, LivePolling, LIVE_STATUS_ERROR_EVENT, HlsKernel, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf } from 'live-sdk'
 import { mountDefaultUI } from 'live-sdk/ui'
 import { usePlayer as usePlayerReact } from 'live-sdk/react'
 import { usePlayer as usePlayerVue } from 'live-sdk/vue'
@@ -28,6 +28,12 @@ import type {
   BufferUpdatePayload,
   CommandHookContext,
   HookPhase,
+  // —— 平台契约（场景 16：自实现平台时用到）——
+  MediaSurface,
+  MediaEventName,
+  HostMount,
+  PlatformAdapters,
+  Observability,
   CommandEventPayload,
   CommandName,
   ErrorDomain,
@@ -409,6 +415,72 @@ const commandCount: number = allCommands.length
 const size = readElementSize(player.root)
 const zero: boolean = size ? isZeroSized(size) : false // size=null 表示环境测不到，不可判为 0
 
+// ══════════ 场景 16：平台契约（P0/P1 解耦改造） ══════════
+//
+// 这些契约是「core 不依赖任何实现」的凭据：自实现平台（非 DOM 宿主、自研媒体面）时，
+// 只需实现它们并构造 `Player`，**不必改 core**。
+// 类型契约在此校验形状；「非 DOM 平台真能跑通」由 test/platform-seam.test.ts 证明。
+
+// 16.1 自实现媒体面：只需满足契约（`raw` 可为任意平台句柄）
+const mediaSurface: MediaSurface<{ kind: 'my-media' }> = {
+  raw: { kind: 'my-media' },
+  play: async () => undefined,
+  pause: () => undefined,
+  seek: (_t: number) => undefined,
+  muted: false,
+  volume: 1,
+  playbackRate: 1,
+  paused: true,
+  currentTime: 0,
+  duration: Infinity,
+  error: () => null,
+  buffered: () => [],
+  requestFullscreen: (_target?: unknown) => undefined,
+  exitFullscreen: () => undefined,
+  isFullscreen: () => false,
+  on: (_event: MediaEventName, _cb: (data?: unknown) => void) => () => undefined,
+  destroy: () => undefined,
+}
+
+// 16.2 自实现承载面：`container` / `root` 由平台自行解释
+const hostMount: HostMount<{ kind: 'my-root' }> = {
+  root: { kind: 'my-root' },
+  mount: (_container: unknown, _media: unknown) => undefined,
+  measure: () => null,
+  showPosterOverlay: (_src: string) => undefined,
+  hidePosterOverlay: () => undefined,
+  destroy: () => undefined,
+}
+
+// 16.3 装配包：把平台实现交给 core（`createPlayer` 内部即此形态）
+const platform: PlatformAdapters<{ kind: 'my-media' }, { kind: 'my-root' }> = {
+  media: mediaSurface,
+  host: hostMount,
+  env: {
+    getVisibility: () => 'foreground',
+    onVisibilityChange: () => () => undefined,
+    isOnline: () => true,
+    onNetworkChange: () => () => undefined,
+  },
+  selectKernel: (_url: string, _obs: Observability) => HlsKernel,
+  presets: { live: [] },
+  zeroSizeHint: '（平台自己的排查提示）',
+}
+
+// 16.4 媒体事件名是**受约束的字符串**（换宿主时平台负责把自家事件映射到这些名字）
+const mediaEvents: MediaEventName[] = [
+  'loadedmetadata',
+  'timeupdate',
+  'progress',
+  'play',
+  'playing',
+  'pause',
+  'waiting',
+  'error',
+  'volumechange',
+  'fullscreenchange',
+]
+
 export {
   eqFirstFrame,
   eqFeatures,
@@ -442,4 +514,8 @@ export {
   allCommands,
   commandCount,
   zero,
+  mediaSurface,
+  hostMount,
+  platform,
+  mediaEvents,
 }

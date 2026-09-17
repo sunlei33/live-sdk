@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { readElementSize, isZeroSized } from '../src/utils/size'
+import { readElementSize } from '../src/platform/web/dom'
+import { isZeroSized } from '../src/utils/size'
 
 /** 造一个只带所需测量的假元素（结构类型足够，不必是真 DOM） */
 function el(over: Record<string, unknown>): Element {
