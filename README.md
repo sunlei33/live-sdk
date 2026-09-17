@@ -606,7 +606,7 @@ player.registerPlugin(SentryReporter, { sentry: Sentry })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 53 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 54 条用例，格式：目标 / 配置 / 交互 / 预期
 - [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
@@ -657,9 +657,9 @@ E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重�
 
 | 门 | 拦什么 | 加它的原因 |
 |---|---|---|
-| `verify/layers.mjs` 分层依赖 | 跨层 import 必须符合 spec §3.9 的矩阵（**core 不得依赖实现层**）；core 内不得出现 `document.`/`window.`/`navigator.`；core 不得依赖「读平台」的 utils | `core/Player.ts` 曾直接 `import` 内核 / env / 默认插件 / 媒体面 —— 于是「换媒体面、换内核、换宿主」三件事**每一件都要改 core** |
+| `verify/layers.mjs` 分层依赖 | 跨层 import 必须符合 spec §3.9 的矩阵（**core 不得依赖实现层**）；core 内不得出现 `document.`/`window.`/`navigator.`（只认运行时引用，不认类型收窄）；core 不得依赖「平台专有」的 utils | `core/Player.ts` 曾直接 `import` 内核 / env / 默认插件 / 媒体面 —— 于是「换媒体面、换内核、换宿主」三件事**每一件都要改 core** |
 | `verify/events.mjs` 事件活性 | 每个 `Events` 枚举成员必须至少有一个真实 `emit` 派发点，**零派发即构建失败** | 「`on()` 注册会成功、但永不触发」的静默失效，类型校验、冒烟、E2E、单测**都拦不住**（详见技术实现档案 §9） |
-| `verify/exports.mjs` 公开面形状 | 顶层导出 / `sniffer` 成员 / 枚举与常量内容与清单**精确集合比对**，缺失与多余都失败 | 原实现只问「名字在不在」，于是**成员级的删除/改名完全不被拦住** |
+| `verify/exports.mjs` 公开面形状 | 顶层导出 / 枚举与常量内容与清单**精确集合比对**，缺失与多余都失败 | 原实现只问「名字在不在」，于是**成员级的删除/改名完全不被拦住** |
 | `verify/surface.mjs` 公开面活性 | 清单里每个公开名在 `src/` 必须有消费者，或有测试覆盖；两者皆无须登记豁免并写理由 | `sniffer` 曾有 5 个函数零引用零测试、占该文件 51%，一路活到 0.6.0 才被人工发现（随 0.6.0 删除） |
 | `verify/artifacts.mjs` 产物卫生 | `dist/**/*.d.ts` 必须能对应到 `src/**/*.ts`；`package.json` 的 `exports` 目标必须存在；`dist/*.es.js` 必须都被 `exports` 引用 | 构建链**不清理 `dist`**，删掉/改名的源文件会留下孤儿声明，而 `npm pack` 打的正是磁盘上的 `dist` |
 
@@ -670,6 +670,11 @@ E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重�
 > `exports` 与 `surface` 还**必须成对**：形状门把新增导出「逼」进清单（`verify/public-surface.mjs`），
 > 活性门再审清单里每一项的活性。单用任一个都有盲区 —— 只用形状门，那 5 个死函数当年照样全绿；
 > 只用活性门，未登记的新导出会被直接跳过。
+
+> **能力探测放在哪**：宿主能力（MSE）在平台实现内（`platform/web/capabilities`，**不对外导出**）；
+> 「这个媒体设备能不能播某个 MIME」是**契约能力**，走 `player.canPlay(mime)`。
+> 旧版从主入口导出的 `sniffer` 命名空间已移除 —— 它整个模块都是 Web 实现，
+> 媒体设备能力上移到 `MediaSurface`，宿主能力归平台层（详见技术实现档案 §8.12）。
 
 ## 许可
 
@@ -1273,7 +1278,7 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 53 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 54 cases in the format: goal / config / interaction / expectation
 - [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development
@@ -1321,12 +1326,14 @@ Four more static gates guard adjacent blind spots:
 
 | Gate | What it blocks | Why it exists |
 |---|---|---|
-| `verify/layers.mjs` layering | cross-layer imports must match the matrix in spec §3.9 (**core may not depend on implementation layers**); no DOM globals inside `core`; `core` may not use platform-reading utils | `core/Player.ts` used to import the kernel / env / default plugins / media surface directly — so switching media surface, kernel or host **all required touching core** |
-| `verify/exports.mjs` public-surface shape | exact set comparison of top-level exports / `sniffer` members / enum members against the manifest — both **missing and extra** names fail | the previous version only asked "is the name present", so member-level deletions and renames were never caught |
+| `verify/layers.mjs` layering | cross-layer imports must match the matrix in spec §3.9 (**core may not depend on implementation layers**); no DOM globals inside `core` (runtime references only — type narrowing is allowed); `core` may not use platform-specific utils | `core/Player.ts` used to import the kernel / env / default plugins / media surface directly — so switching media surface, kernel or host **all required touching core** |
+| `verify/exports.mjs` public-surface shape | exact set comparison of top-level exports / enum members / constant contents against the manifest — both **missing and extra** names fail | the previous version only asked "is the name present", so member-level deletions and renames were never caught |
 | `verify/surface.mjs` public-surface liveness | every name in the manifest must have a consumer in `src/` or test coverage; otherwise it must be registered in an exemption list with a written reason | `sniffer` had 5 zero-reference, zero-test functions (51% of the file) that survived until 0.6.0 |
 | `verify/artifacts.mjs` artifact hygiene | every `dist/**/*.d.ts` must map to a `src/**/*.ts`; every `package.json` `exports` target must exist; every `dist/*.es.js` must be referenced by `exports` | nothing in the build pipeline cleans `dist`, so deleted/renamed sources leave orphan declarations — and `npm pack` packs exactly what is on disk |
 
 > `exports` and `surface` are **a pair**: the shape gate forces new exports into the manifest (`verify/public-surface.mjs`), and the liveness gate then audits each entry. Either one alone has a blind spot — with the shape gate only, those 5 dead functions were green for years; with the liveness gate only, newly added but unregistered exports are skipped entirely.
+
+> **Where capability probing lives**: host capability (MSE) sits inside the platform implementation (`platform/web/capabilities`, **not publicly exported**); "can this media device play a given MIME" is a **contract** capability — `player.canPlay(mime)`. The old top-level `sniffer` namespace has been removed: the whole module was a Web implementation, so media-device capability moved up to `MediaSurface` and host capability moved down to the platform layer (see the implementation dossier §8.12).
 
 ## License
 

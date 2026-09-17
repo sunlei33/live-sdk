@@ -707,19 +707,32 @@
 > 本节的两条都是**移除**。判据相同：被移除的东西要么已被更好的机制取代，要么不属于 SDK 的核心职责。
 > 升级前请对照自查 —— 两者都不会在编译期以外的地方报错（JS 接入方尤其要看）。
 
-### US-49 `sniffer` 只保留能力探测（UA 嗅探函数已移除）
+### US-49 能力探测归位：`sniffer` 命名空间移除（UA 嗅探更早已移除）
 
-- **目标**：平台差异一律用能力判定，SDK 不再对外提供 UA 嗅探函数（避免诱导接入方写回平台分支）。
-- **配置**：默认。
+- **目标**：平台差异一律用能力判定；并且**探测代码住在平台层**，不作为「平台无关的公开工具」导出
+  —— 原 `utils/sniffer.ts` 整个模块都是 Web 实现（`window` 能力位 + `video.canPlayType`），放在 `utils/` 下是分类错误。
+- **配置**：默认（无配置项）。
 - **交互**：
-  1. `import { sniffer } from '@fancaf/live-sdk'`，取 `Object.keys(sniffer)`。
-  2. 对能力探测函数逐个断言：`supportsMSE()` / `supportsManagedMediaSource()` / `canPlayNativeHLS(video)` / `canPlayNativeMP4(video)`。
+  1. `import * as sdk from '@fancaf/live-sdk'`，检查 `sniffer` 是否为导出。
+  2. 需要「这个媒体设备能不能播某格式」时，用 `player.canPlay(mime)`。
+  3. 平台判定迁移：过去 `if (isIOS()) { video.webkitEnterFullscreen() }` → 现在 `if (typeof video.webkitEnterFullscreen === 'function')`。
 - **预期**：
-  1. `sniffer` **恰好只有 4 个成员**，即上述 4 个能力探测函数。
-  2. `isIOS` / `isSafari` / `isAndroid` / `supportsH264` / `canAutoplay` **均不存在**（这 5 个在 0.5.0 及更早版本存在，0.6.0 移除）。
-  3. **迁移对照**：过去 `if (isIOS()) { video.webkitEnterFullscreen() }` → 现在 `if (typeof video.webkitEnterFullscreen === 'function')`；过去用 `canAutoplay()` 预判起播可行性 → 现在不需要预判，SDK 在运行时处理（`playIntent` + 捕获 `NotAllowedError` 后回滚快照），预探测反而会误判（探测时的手势状态 ≠ 真正起播时的手势状态）。
-  4. 移除的 5 个函数在 0.5.0 及更早版本中**本就零引用零测试**（占该文件 51%），SDK 内部从未调用 —— 因此移除只影响直接引用过它们的接入方代码。
-  5. 该变更由 `verify/exports.mjs`（公开面形状精确集合比对）与 `verify/surface.mjs`（公开面活性普查）共同守住：以后再出现「零消费者的公开导出」或「静默改名/删除」，构建即失败。
+  1. **`sniffer` 不再从主入口导出**（`'sniffer' in sdk === false`）；`src/utils/sniffer.ts`（拆解）与
+     `src/utils/fullscreen.ts`（搬运到 `platform/web/`）**均已不存在**。
+  2. `player.canPlay('application/vnd.apple.mpegurl')` 可用：Web 实现把 `canPlayType()` 的三态
+     收敛为布尔 —— **非空即可播**，`'maybe'` 与 `'probably'` 都算 `true`。
+  3. **媒体设备能力（能否播某 MIME）在 `MediaSurface` 契约上；宿主能力（MSE）在平台实现内且不对外导出。**
+     接入方若确有需要，应在自己的平台实现里探测，而不是依赖 SDK 导出的探测函数。
+  4. `isIOS` / `isSafari` / `isAndroid` / `supportsH264` / `canAutoplay` **均不存在**
+     （这 5 个在 0.5.0 及更早版本存在；它们当时**零引用零测试**、占该文件 51%，SDK 内部从未调用）。
+  5. `canAutoplay` 的替代不是另一个探测函数：起播可行性由**运行时**承担
+     （`playIntent` + 捕获 `NotAllowedError` 后回滚快照）—— 预探测会误判，因为探测时的手势状态 ≠ 真正起播时的。
+  6. **内核选路不受影响**：`observability: 'basic'` 下仍是「原生可播 HLS → 原生可播 MP4 → MSE」，
+     其中前两项改问 `media.canPlay()`、第三项问平台侧 MSE 探测；`'full'` 档仍优先 `HlsKernel`，
+     无 MSE 时落 `NativeKernel`。
+  7. iOS 17.1+ / macOS 14.1+ 仍走 ManagedMediaSource（`HlsKernel` 不再自行探测，改为交由 hls.js 降级）—— 见 US-52。
+  8. 由三道门守住：`verify/exports.mjs`（公开面形状精确集合）、`verify/surface.mjs`（公开面活性）、
+     `verify/layers.mjs`（`core` 不得依赖平台专有 utils）—— 「静默改名/删除」或「公开面漂移」构建即失败。
 
 ### US-50 上报适配器不再内置（第三方绑定移出核心）
 
@@ -748,7 +761,7 @@
   import { Player } from '@fancaf/live-sdk'
   import type { MediaSurface, HostMount, EnvAdapter, PlatformAdapters } from '@fancaf/live-sdk'
 
-  const media: MediaSurface<MyHandle> = { /* play/pause/seek/muted/error/buffered/on/destroy … */ }
+  const media: MediaSurface<MyHandle> = { /* play/pause/seek/muted/error/buffered/canPlay/on/destroy … */ }
   const host: HostMount<MyRoot>    = { /* mount/measure/showPosterOverlay/destroy … */ }
   const env: EnvAdapter            = { /* getVisibility/onVisibilityChange/isOnline … */ }
   const platform: PlatformAdapters<MyHandle, MyRoot> = {
@@ -769,6 +782,27 @@
   7. 依赖方向由 `verify/layers.mjs` 强制：**core 不会反向依赖任何实现层** —— 这也是「换平台不必改 core」的机器保证。
   8. **已知边界**：`player.media` / `player.root` 的类型仍声明为 Web 类型（`HTMLVideoElement` / `HTMLElement`），
      非 Web 宿主需自行 `as` 收窄；完全类型中立（泛型放宽）尚未做，见 spec §3.9。
+  9. **`canPlay(mime)` 必须由你回答**：内核选路会问它「你能不能直接播 HLS / MP4」—— 这正是它进契约的理由
+     （换宿主不该靠 Web 的 `canPlayType` 语义外推）。小程序媒体面对 m3u8 直接返回 `true` 即可；
+     `test/platform-seam.test.ts` 的假媒体面就是这么写的，可作为样板。
+
+### US-52 ManagedMediaSource 行为保持（内核不再自行探测）
+
+- **目标**：`HlsKernel` 去掉平台能力探测后，iOS 17.1+ / macOS 14.1+ 仍走 MMS（可内联播放、更省电），
+  且**其余平台行为完全不变**。
+- **配置**：`{}`（默认）。`hlsConfig.preferManagedMediaSource` 仍可覆盖。
+- **交互**：iOS 17.1+ Safari 起播一条 HLS 流；Chrome 起播同一条流。
+- **预期**：
+  1. iOS 17.1+ 走 ManagedMediaSource；Chrome 走标准 MSE —— 与改动前一致。
+  2. **依据**：hls.js 对 `preferManagedMediaSource` **自带可用性降级** ——
+     `const mms = (prefer || !self.MediaSource) && self.ManagedMediaSource; return mms || self.MediaSource || self.WebKitMediaSource`。
+     「prefer」与「MMS 存在」是 **AND**，故恒传 `true` 与「探测到才传 true」在所有组合下等价。
+     好处是内核**不需要任何平台探测**，也就不会反向依赖平台实现层（见 US-49 第 8 条）。
+  3. hls.js 自身的 config 默认值是 `false`（见其 `hlsDefaultConfig`），因此**这一项不能省** ——
+     省掉会让 iOS 17.1+ 退回标准 MSE（这是本轮改动前特意核对过的点）。
+  4. `hlsConfig.preferManagedMediaSource: false` 可显式关闭（该展开在 SDK 默认值之后）。
+  5. **验收方式**：① 源码层核对 `HlsKernel#ensureHls` 传入的 `config`；② iOS 17.1+ 真机/模拟器手测内联播放；
+     ③ 其余平台回归由现有 E2E 覆盖。⚠️ **第 1 条无法在 CI 自动化**（需要 iOS 真机与特定系统版本）。
 
 ---
 

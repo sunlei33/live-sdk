@@ -33,7 +33,6 @@ export const CORE = [
   'readElementSize',
   'resolveContainer',
   'setLogLevel',
-  'sniffer',
 ]
 
 /** 顶层导出（`live-sdk/ui`） */
@@ -49,8 +48,13 @@ export const UI = [
   'mountDefaultUI',
 ]
 
-/** 命名空间成员（`sniffer.*`）。只保留能力探测 —— UA 嗅探已于 0.6.0 删除。 */
-export const SNIFFER = ['canPlayNativeHLS', 'canPlayNativeMP4', 'supportsMSE', 'supportsManagedMediaSource']
+/**
+ * 原先这里还有一组 `sniffer` 命名空间成员（4 个能力探测函数）。**已随公开面一并移除**：
+ * 整个 `utils/sniffer.ts` 都是 Web 平台实现，已按语义拆解 ——
+ * 媒体设备能力 → `MediaSurface.canPlay()` 契约（宿主侧自行实现），
+ * 宿主能力 → `platform/web/capabilities`（内部模块，不对外导出）。
+ * 旧写法 `import { sniffer } from '@fancaf/live-sdk'` 的替代：`player.canPlay(mime)`。
+ */
 
 /** `Events` 枚举成员（19 个，`COMMAND` 为统一命令观测） */
 export const EVENTS = [
@@ -145,6 +149,7 @@ export const PLAYER_PUBLIC = [
   'once',
   'emit',
   // 指标与诊断
+  'canPlay',
   'getStats',
   'bufferInfo',
   'speedInfo',
@@ -175,7 +180,6 @@ export const PLAYER_PUBLIC = [
 export const GROUPS = [
   { key: 'core', label: 'core 顶层导出', names: CORE, kind: 'identifier' },
   { key: 'ui', label: 'ui 顶层导出', names: UI, kind: 'identifier' },
-  { key: 'sniffer', label: 'sniffer 成员', names: SNIFFER, kind: 'identifier' },
   { key: 'events', label: 'Events 成员', names: EVENTS, kind: 'identifier' },
   { key: 'errorCode', label: 'ERROR_CODE 成员', names: ERROR_CODE, kind: 'identifier' },
   { key: 'errorDomain', label: 'ERROR_DOMAIN 成员', names: ERROR_DOMAIN, kind: 'identifier' },

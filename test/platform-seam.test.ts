@@ -73,6 +73,14 @@ function makeFakeSurface() {
     isFullscreen: () => false,
     error: () => null,
     buffered: () => [[0, 30]] as Array<[number, number]>,
+    /**
+     * 媒体设备能力由**本平台**自行回答（这正是它进契约而非留在平台外探测的理由）：
+     * 这里模拟「本宿主原生就能播 HLS」，无需 `canPlayType`。
+     */
+    canPlay: (type: string) => {
+      calls.push(`canPlay:${type}`)
+      return type === 'application/vnd.apple.mpegurl'
+    },
     on: (event: string, cb: (data?: unknown) => void) => {
       calls.push(`on:${event}`)
       const set = listeners.get(event) ?? new Set()
@@ -233,6 +241,23 @@ describe('平台接缝：非 DOM 宿主也能跑通（架构适配性的直接�
     expect(p.getState().muted).toBe(true)
     expect(p.getState().volume).toBe(0.3)
     expect(p.getState().playing).toBe(false)
+
+    p.destroy()
+  })
+
+  it('媒体能力查询：`player.canPlay(mime)` 转发给平台，无需 canPlayType', async () => {
+    const { Ctor } = makeFakeKernel()
+    const p = new Player(
+      { container: '#mini', url: 'https://cdn/live.m3u8', kernel: Ctor } as never,
+      makePlatform(surface, host, Ctor) as never,
+    )
+
+    // 假媒体面声明「本宿主原生就能播 HLS」—— 这正是它进契约的理由：
+    // core 只转发结果，不解释、也不需要知道 Web 的 canPlayType 三态。
+    expect(p.canPlay('application/vnd.apple.mpegurl')).toBe(true)
+    expect(surface.calls).toContain('canPlay:application/vnd.apple.mpegurl')
+    // 别的 MIME 由平台自己判否
+    expect(p.canPlay('video/mp4')).toBe(false)
 
     p.destroy()
   })

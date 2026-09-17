@@ -755,6 +755,16 @@ check('destroy 后 root 已移除', true)
   console.warn = orig
   check('零尺寸时告警一次且不重复', zeroWarns.filter((w) => w.includes('容器尺寸为 0')).length === 1)
   pSize.destroy()
+
+  // ══════════ 28：媒体能力查询 player.canPlay()（原 sniffer 的公开替代） ══════════
+  const pCap = createPlayer({ container: '#playerCap' })
+  check('canPlay：替身默认不支持任何格式 → false', pCap.canPlay('application/vnd.apple.mpegurl') === false)
+  // 让替身「原生可播 HLS」→ 立即生效（能力在调用时读取，不做模块级捕获）
+  pCap.media.canPlayType = (t) => (t === 'application/vnd.apple.mpegurl' ? 'maybe' : '')
+  check('canPlay：非空串即视为可播（"maybe" 也算 true）', pCap.canPlay('application/vnd.apple.mpegurl') === true)
+  check('canPlay：MP4 与 HLS 分别判定，互不代表', pCap.canPlay('video/mp4') === false)
+  check('canPlay：签名与用法（MIME 字符串入参、布尔返回）', typeof pCap.canPlay('video/mp4') === 'boolean')
+  pCap.destroy()
 }
 
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)

@@ -1,6 +1,5 @@
 import Hls from 'hls.js'
 import type { BufferInfo, Kernel, KernelCapabilities, KernelOptions, LevelInfo, StatsInfo } from '../types'
-import { supportsManagedMediaSource } from '../utils/sniffer'
 import { analyzeBuffer, readBuffers } from '../utils/buffer'
 import { logger } from '../utils/logger'
 
@@ -158,8 +157,15 @@ export class HlsKernel implements Kernel {
     if (this.hls) return
     const config: Record<string, unknown> = {
       lowLatencyMode: true,
-      // iOS 17.1+ / macOS 14.1+ 走 ManagedMediaSource（MMS）
-      preferManagedMediaSource: supportsManagedMediaSource(),
+      // 恒取 true，**不做平台能力探测** —— hls.js 自己会对该偏好做可用性降级：
+      //   const mms = (prefer || !self.MediaSource) && self.ManagedMediaSource
+      //   return mms || self.MediaSource || self.WebKitMediaSource
+      // 即「prefer」与「ManagedMediaSource 存在」是 **AND** 关系，MMS 不存在时自动落回标准 MSE。
+      // 因此 `true` 与「探测到 MMS 才传 true」在所有组合下等价（hls.js 1.7.2 源码核实）；
+      // 而 hls.js 自己的 config 默认值是 `false`（见其 `hlsDefaultConfig`），所以这一项不能省。
+      // 好处：内核不再需要任何平台能力探测 → 不必反向依赖平台实现层（见 verify/layers.mjs）。
+      // 仍可被 `hlsConfig.preferManagedMediaSource` 覆盖（展开在最后）。
+      preferManagedMediaSource: true,
       ...this.opts.hlsConfig,
     }
     const hls = new Hls(config as never)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveFullscreenPlan, isPlayerFullscreen } from '../src/utils/fullscreen'
+import { resolveFullscreenPlan, isPlayerFullscreen } from '../src/platform/web/fullscreen'
 
 /** 构造只带所需能力的假元素（结构类型足够，不必是真 DOM） */
 function el(over: Record<string, unknown> = {}): Element {

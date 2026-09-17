@@ -585,6 +585,23 @@ export class Player {
 
   // ═══════════════ 可观测 ═══════════════
 
+  /**
+   * 该**媒体设备**能否播放给定 MIME（如 `'application/vnd.apple.mpegurl'`）。
+   *
+   * 取代原先从主入口导出的 `sniffer.canPlayNativeHLS` / `canPlayNativeMP4` ——
+   * 它们是媒体设备能力，现在由平台契约 `MediaSurface.canPlay()` 回答，core 只做转发、**不解释结果**
+   * （非 Web 宿主由宿主自己回答，不必让平台外推 Web 的 `canPlayType` 语义，见 spec §3.9）。
+   *
+   * ⚠️ 注意不要与 `player.media.canPlayType()` 混：`player.media` 是**原生媒体句柄**
+   * （Web 即 `HTMLVideoElement`，值是裸字符串三态），本方法返回的是**收敛后的布尔**，
+   * 且换宿主后依然可用。
+   *
+   * 典型用途：决定「是否提示换浏览器 / 打开 App」，或自建内核选路。
+   */
+  canPlay(type: string): boolean {
+    return this.surface.canPlay(type)
+  }
+
   getStats(): StatsInfo {
     return this.kernel?.getStats() ?? {}
   }
@@ -870,7 +887,7 @@ export class Player {
   /**
    * 内核选路：`= f(源格式, 平台能力, 观测档位)`（spec §7.2）。
    *
-   * **默认内核的选择属于平台**：`HlsKernel` / `NativeKernel` 以及 `sniffer` 能力探测
+   * **默认内核的选择属于平台**：`HlsKernel` / `NativeKernel` 以及平台能力探测
    * 全部搬到了 `src/platform/web/selectKernel.ts`（P0 解耦），core 只保留一条
    * 平台无关的判断 —— **接入方显式指定 `config.kernel` 时优先**。
    */

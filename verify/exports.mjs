@@ -4,10 +4,13 @@
  * ── 为什么从 `k in sdk` 改成「精确集合比对」──
  *
  * 原实现只问「这个名字在不在 `sdk` 上」，于是**成员级的漂移完全不被拦住**：
- * 命名空间成员（如 `sniffer.xxx`）、枚举成员、常量内容被删除或改名都不会失败。
+ * 命名空间成员（如当时的 `sniffer.xxx`）、枚举成员、常量内容被删除或改名都不会失败。
  * 实测后果：`sniffer` 有 5 个函数（isIOS / isSafari / isAndroid / supportsH264 / canAutoplay）
  * 零引用、零测试、却一路活到 0.6.0 —— 因为没有任何一道门会看它们一眼；
  * 而 `bindPress` / `VolumeControl` 这两项**确实对外**的导出，则连清单里都没有。
+ *
+ * （该命名空间本身已在 0.6.0 之后整体移除 —— 它整个模块都是 Web 平台实现，
+ * 媒体设备能力上移到 `MediaSurface.canPlay()`，宿主能力归 `platform/web/capabilities`。）
  *
  * 现在**缺失与多余都算失败**：任何公开面变化都必须显式更新 `public-surface.mjs`。
  * 这是刻意的 —— 公开面属于契约，改动应当是一次**有意识的决定**
@@ -45,7 +48,6 @@ import * as vue from '../dist/live-sdk-vue.es.js'
 import {
   CORE,
   UI,
-  SNIFFER,
   EVENTS,
   ERROR_CODE,
   ERROR_DOMAIN,
@@ -85,10 +87,6 @@ exactSet('core (live-sdk) 顶层导出', Object.keys(sdk), CORE)
 exactSet('ui (live-sdk/ui) 顶层导出', Object.keys(ui), UI)
 exactSet('react (live-sdk/react) 顶层导出', Object.keys(react), ['usePlayer'])
 exactSet('vue (live-sdk/vue) 顶层导出', Object.keys(vue), ['usePlayer'])
-
-// ───────────────────────────── 命名空间成员 ─────────────────────────────
-
-exactSet('sniffer 成员', Object.keys(sdk.sniffer), SNIFFER)
 
 // ───────────────────────────── 枚举与常量内容 ─────────────────────────────
 

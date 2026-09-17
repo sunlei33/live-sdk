@@ -1,6 +1,13 @@
 /**
  * 全屏目标与 API 选路的纯函数（与 DOM 解耦，便于单测）。
  *
+ * ── 为什么在 `platform/web/` ──
+ *
+ * 下面三种全屏实现**全部是 Web 特有的**（标准 Fullscreen API / WebKit 前缀 / iOS 私有），
+ * 换宿主（小程序 / 原生播放器）时这套选路**整个不适用** —— 因此它属于平台实现，不属于 utils。
+ * 保持独立文件而不并入 `WebMediaSurface`：这样选路逻辑仍可被纯函数单测覆盖
+ * （`test/fullscreen.test.ts`，假元素即可，不需要 DOM），合并进类里等于放弃这层覆盖。
+ *
  * 为什么需要「选路」：全屏有三种互不兼容的实现，且**同一次请求可能落到不同元素**——
  * - `<video>.webkitEnterFullscreen()`：iOS 原生视频全屏，**不走 Fullscreen API**
  *   （`document.fullscreenElement` 不反映它，只能读 `video.webkitDisplayingFullscreen`）；

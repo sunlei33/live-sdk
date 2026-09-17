@@ -7,20 +7,24 @@
  *
  * 注意「默认内核的选择属于平台」这条结论 —— core 保留的只是
  * 「接入方显式指定 `config.kernel` 时优先」这一条平台无关的判断。
+ *
+ * 两项能力探测的取处不同（见 `./capabilities.ts` 的说明）：
+ * - **宿主能力** `supportsMSE()` —— 问 `window`；
+ * - **媒体设备能力** `media.canPlay(mime)` —— 问媒体面契约（换宿主时由宿主自己回答）。
  */
-import type { KernelConstructor, Observability } from '../../types'
+import type { KernelConstructor, MediaSurface, Observability } from '../../types'
 import { HlsKernel } from '../../kernel/HlsKernel'
 import { NativeKernel } from '../../kernel/NativeKernel'
-import { canPlayNativeHLS, canPlayNativeMP4, supportsMSE } from '../../utils/sniffer'
+import { MIME_HLS, MIME_MP4, supportsMSE } from './capabilities'
 
-export function selectWebKernel(media: HTMLVideoElement, observability: Observability): KernelConstructor {
+export function selectWebKernel(media: MediaSurface, observability: Observability): KernelConstructor {
   if (observability === 'full') {
     if (HlsKernel.isSupported()) return HlsKernel
     return NativeKernel // 无 MSE（Safari <17.1）→ 原生 HLS，深度观测落 basic
   }
   // basic
-  if (canPlayNativeHLS(media)) return NativeKernel
-  if (canPlayNativeMP4(media)) return NativeKernel // 渐进式 MP4 直连
+  if (media.canPlay(MIME_HLS)) return NativeKernel
+  if (media.canPlay(MIME_MP4)) return NativeKernel // 渐进式 MP4 直连
   if (supportsMSE() && HlsKernel.isSupported()) return HlsKernel
   throw new Error('平台不支持任何可用播放内核')
 }

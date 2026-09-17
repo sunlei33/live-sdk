@@ -129,7 +129,7 @@ export interface Kernel {
   setLiveLatency?(target: number, max: number): void // LL-HLS 运行时更新目标延迟
 }
 
-/** 内核构造器（createPlayer 的 kernel 参数 / sniffer 自动选路产物） */
+/** 内核构造器（createPlayer 的 kernel 参数 / 平台能力选路的产物） */
 export interface KernelConstructor {
   new (opts: KernelOptions): Kernel
   isSupported(): boolean
@@ -230,6 +230,17 @@ export interface MediaSurface<TMedia = unknown> {
    * 「近尾判定」需要它；平台拿不到时返回空数组（与「无缓冲」同义，调用方按空处理）。
    */
   buffered(): Array<[number, number]>
+  /**
+   * **该媒体设备能否播放给定 MIME 类型**（如 `application/vnd.apple.mpegurl`）。
+   *
+   * 放进契约而不是留在平台外做能力探测：它问的是「**这个媒体设备**能不能播」，
+   * 属于媒体设备能力。换宿主时各自回答即可（小程序媒体面对 m3u8 直接返回 `true`），
+   * 不必让平台侧拿 Web 的 `canPlayType` 语义去外推别的宿主。
+   *
+   * Web 实现把 `canPlayType()` 的三态（`''` / `'maybe'` / `'probably'`）收敛为布尔
+   * （非空即视为可播）。
+   */
+  canPlay(type: string): boolean
   /** 请求全屏；`target` 为容器时做容器级全屏（缺省全屏媒体本身）。 */
   requestFullscreen(target?: unknown): void
   exitFullscreen(): void
@@ -288,7 +299,8 @@ export interface PlatformAdapters<TMedia = unknown, TRoot = unknown> {
   host: HostMount<TRoot>
   env: EnvAdapter
   /**
-   * 内核选路：**默认内核的选择属于平台**（Web 依 sniffer 能力探测）
+   * 内核选路：**默认内核的选择属于平台**（Web 依 `platform/web/capabilities` 的
+   * MSE 探测 + `media.canPlay()` 的媒体设备能力）
    * —— 这正是 core 不再 `import HlsKernel` 后必须留下的钩子。
    * 接入方显式指定 `PlayerConfig.kernel` 时优先级更高，由 core 先判。
    */
@@ -672,7 +684,7 @@ export interface ReportRecord {
 export interface PlayerConfig {
   container: string | HTMLElement // 必填
   url?: string // 缺省主播放地址；服务端下发统一走 play(PlayConfig)
-  kernel?: KernelConstructor // 缺省 sniffer 自动选
+  kernel?: KernelConstructor // 缺省由平台能力自动选
   hlsConfig?: Record<string, unknown> // 透传 hls.js 原生配置
   preset?: string | PluginConstructor[] // 插件组合，默认 'live'
   autoplay?: boolean // 默认 false；true = createPlayer 后自动发起一次 play()（需同时给 url）

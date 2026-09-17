@@ -11,7 +11,7 @@
  */
 import type { MediaEventName, MediaSurface } from '../../types'
 import { readBuffers } from '../../utils/buffer'
-import { isPlayerFullscreen, resolveFullscreenPlan, type FullscreenTarget, type FullscreenVideo } from '../../utils/fullscreen'
+import { isPlayerFullscreen, resolveFullscreenPlan, type FullscreenTarget, type FullscreenVideo } from './fullscreen'
 
 export class WebMediaSurface implements MediaSurface<HTMLVideoElement> {
   readonly el: HTMLVideoElement
@@ -216,6 +216,17 @@ export class WebMediaSurface implements MediaSurface<HTMLVideoElement> {
   /** 已缓冲区间（读 `<video>.buffered`；共用 utils/buffer 的读取逻辑） */
   buffered(): Array<[number, number]> {
     return readBuffers(this.el.buffered)
+  }
+
+  /**
+   * 该 `<video>` 能否播放给定 MIME（`canPlayType()` 三态收敛为布尔）。
+   *
+   * 原为 `utils/sniffer.ts` 的 `canPlayNativeHLS` / `canPlayNativeMP4` —— 它们问的是
+   * 「**这个媒体设备**能不能播」，属媒体设备能力，故上移到本契约（见 `types.ts#MediaSurface.canPlay`）。
+   * `canPlayType` 返回 `''`（不支持）/ `'maybe'` / `'probably'`，非空即视为可播。
+   */
+  canPlay(type: string): boolean {
+    return this.el.canPlayType(type) !== ''
   }
 
   destroy(): void {

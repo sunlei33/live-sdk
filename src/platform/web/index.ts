@@ -22,7 +22,7 @@ import { WebMediaSurface } from './WebMediaSurface'
 import { WebHost } from './WebHost'
 import { selectWebKernel } from './selectKernel'
 
-/** 功能插件预设（不含内核 —— 内核由 `config.kernel` / sniffer 选路，见 spec §3.5）。 */
+/** 功能插件预设（不含内核 —— 内核由 `config.kernel` / 平台能力选路决定，见 spec §3.5）。 */
 const WEB_PRESETS: Record<string, PluginPresetEntry[]> = {
   live: [ConsoleReporter, LivePolling],
   vod: [ConsoleReporter],
@@ -43,7 +43,8 @@ export function createWebPlatform(opts: { kernel?: KernelConstructor } = {}): Pl
     env: new WebEnvAdapter(),
     selectKernel: (url: string, observability: Observability): KernelConstructor => {
       void url // 当前选路只看平台能力与观测档位，源格式尚未参与（保留入参以便后续按格式分支）
-      return opts.kernel ?? selectWebKernel(media.raw, observability)
+      // 媒体面在这里闭包传入：它是平台自己的对象，无需 core 中转
+      return opts.kernel ?? selectWebKernel(media, observability)
     },
     presets: WEB_PRESETS,
     zeroSizeHint: '请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。',

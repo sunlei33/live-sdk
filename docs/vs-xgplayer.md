@@ -182,7 +182,7 @@
 | | live-sdk | xgplayer |
 |---|---|---|
 | **初始化** | `createPlayer({ container, url, kernel, preset, hlsConfig })` —— 工厂函数，显式注入内核 | `new Player({ id, url, ... })` —— 类构造，内核由 `presets`/`ignores` 隐式决定 |
-| **内核选择** | 显式：`kernel: HlsKernel`，缺省 sniffer 自动选 | 隐式：靠引入哪个插件包（`xgplayer-hls` / `xgplayer-flv`）自动注册 |
+| **内核选择** | 显式：`kernel: HlsKernel`，缺省按平台能力自动选 | 隐式：靠引入哪个插件包（`xgplayer-hls` / `xgplayer-flv`）自动注册 |
 | **UI** | 完全外置（`live-sdk/ui` 独立包），可不用 | 内建，`preset` 决定挂哪些控件 |
 | **命令** | **12 条**：`play(config?)` / `pause()` / `mute()` / `setVolume()` / `switchQuality(id)` / `switchURL(url)` / `requestFullscreen(target?)` / `exitFullscreen()` / `seek(t)` / `setPlaybackRate(r)` / `setPoster()` / `setLiveLatency()`。另有 `setAppState()` / `report()` / `registerPlugin()` / `useHooks()` | `play()` / `pause()` / `seek()` / `switchUrl()` / `switchDefinition()` / `retry()` / `replay()` / `playNext()` / `destroy()` 等（含 VOD 专属命令） |
 | **状态查询** | `getState()` 返回快照对象（`playing` / `currentTime` / `duration` 等语义字段） | 直接读实例属性（`player.paused` / `player.currentTime`），状态散落 |

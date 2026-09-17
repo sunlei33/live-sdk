@@ -43,8 +43,9 @@ export { Events, ERROR_CODE, ERROR_DOMAIN, BUFFER_LEVEL_THRESHOLDS, bufferLevelO
 export type { SessionState, ErrorDomain, CommandName } from './constants'
 
 // —— 工具 ——
+// 注：原先在这里导出的 `sniffer` 命名空间已移除 —— 它整个模块都是 Web 平台实现，
+// 按语义拆成两处：媒体设备能力 → `MediaSurface.canPlay()`（契约），宿主能力 → `platform/web/capabilities`。
 export { deepMerge } from './utils/config'
-export * as sniffer from './utils/sniffer'
 export { logger, setLogLevel } from './utils/logger'
 export { errorDomainOf } from './utils/errors'
 export { isZeroSized } from './utils/size'

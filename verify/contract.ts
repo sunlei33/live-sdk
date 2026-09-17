@@ -435,6 +435,8 @@ const mediaSurface: MediaSurface<{ kind: 'my-media' }> = {
   duration: Infinity,
   error: () => null,
   buffered: () => [],
+  // 媒体设备能力：由**本平台**回答（这正是它进契约的理由 —— 换宿主不必拿 Web 的 canPlayType 外推）
+  canPlay: (_type: string) => true,
   requestFullscreen: (_target?: unknown) => undefined,
   exitFullscreen: () => undefined,
   isFullscreen: () => false,

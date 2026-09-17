@@ -25,8 +25,17 @@
  * 证明：依赖方向符合架构约定（运行时层面）。
  * **未证明类型层面的平台中立**：`core` 里仍允许把 `platform.media.raw as HTMLVideoElement` 这类
  * **类型收窄**（编译期擦除、不产生运行时耦合）。这是 P1 的**有意取舍**：公开类型 `player.media`
- * 保持 `HTMLVideoElement` 不变，代价是非 Web 宿主需要再放宽一次类型（见 spec §3.10）。
+ * 保持 `HTMLVideoElement` 不变，代价是非 Web 宿主需要再放宽一次类型（见 spec §3.9 的「已知局限」）。
  * 因此本门**不能**被读成「core 已经完全与平台无关」。
+ *
+ * ── 自测记录（2026-09-17，全部实跑）──
+ *
+ * | 越界写法 | 结果 |
+ * |---|---|
+ * | `core` 里 `import { readBuffers } from '../utils/buffer'` | FAIL ✓（buffer 因签名含 `TimeRanges` 被判平台专有） |
+ * | `core` 里写 `'MediaSource' in window` | FAIL ✓（这条原先漏判 —— 正则要求点号） |
+ * | `core` 里做类型收窄 `x as HTMLVideoElement` | **放行 ✓**（有意：类型是编译期擦除，不是运行时耦合） |
+ * | `core` 里写 `document.createElement('div')` | FAIL ✓（原有能力，未被放宽判据削弱） |
  *
  * 退出码非 0 即失败（已接入 `npm run verify`）。
  */
@@ -63,7 +72,34 @@ const NO_DOM_VALUES = new Set(['core'])
 /** 仓库根下的**契约模块**（`src/types.ts` / `src/constants.ts` / `src/index.ts`）视作 "types" 桶。 */
 const ROOT_MODULES = new Set(['types', 'constants', 'index'])
 
-const DOM_VALUE_RE = /\b(document|window|navigator)\s*\.|document\.createElement|\bcreateElement\s*\(|\.appendChild\s*\(|\.querySelector\s*\(/
+/**
+ * `core` 内**不得出现的 DOM 全局值**（真去访问全局对象）。
+ *
+ * 只认**运行时引用**，**不认类型名** —— core 里有合法的类型收窄
+ * （`platform.media.raw as HTMLVideoElement`，编译期擦除、无运行时耦合，见文件头「未证明」一节）。
+ * 把类型名并进这条会误报 core 的每一次收窄，所以它比下面那条**窄**。
+ */
+const DOM_GLOBAL_VALUE_RE =
+  /\b(document|window|navigator)\s*\.|\bin\s+(?:window|document|navigator)\b|document\.createElement|\bcreateElement\s*\(|\.appendChild\s*\(|\.querySelector\s*\(/
+
+/**
+ * 判断一个 `utils/` 模块**是否属于平台实现**（用于「core 不得依赖读平台的 utils」）。
+ *
+ * 判据比上面那条**宽**，因为问的不是同一个问题：这条问「这个模块是不是 Web 平台专有」，
+ * 而 Web 专有**不一定**去访问全局对象。原判据只看 `document.` / `window.`，实测漏判过两处：
+ *
+ * 1. `utils/fullscreen.ts`（现 `platform/web/fullscreen.ts`）：只读**元素自有成员**
+ *    （`el.requestFullscreen` / `video.webkitDisplayingFullscreen` / `el.contains`），
+ *    从不碰全局对象 → 被判为「纯函数」，可它的每个分支都是 Web 全屏 API；
+ * 2. `utils/sniffer.ts`（已按语义拆解）：写的是 `'MediaSource' in window` —— **`in`，没有点号**。
+ *
+ * 故这里额外认：`in window`、以及**引用 DOM 类型名**。
+ *
+ * ⚠️ 正则判据先天可被绕过（本仓库已被绕两次：只匹配单引号的 import 正则、以及这条原先漏掉 `in window`）。
+ * **它只是提醒，不是保证** —— 新写「平台专有但纯」的模块时请按语义自行归位，别只信这道门。
+ */
+const PLATFORM_HINT_RE =
+  /\b(document|window|navigator)\s*\.|\bin\s+(?:window|document|navigator)\b|document\.createElement|\bcreateElement\s*\(|\.appendChild\s*\(|\.querySelector\s*\(|\b(HTMLVideoElement|HTMLMediaElement|HTMLImageElement|HTMLDivElement|HTMLElement|SVGElement|TimeRanges|MediaSource|ManagedMediaSource)\b/
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -87,7 +123,7 @@ const platformUtils = new Set()
 for (const f of files) {
   const rel = relative(SRC, f).split(sep).join('/')
   if (!rel.startsWith('utils/')) continue
-  if (DOM_VALUE_RE.test(stripComments(readFileSync(f, 'utf8')))) platformUtils.add(rel.replace(/\.ts$/, ''))
+  if (PLATFORM_HINT_RE.test(stripComments(readFileSync(f, 'utf8')))) platformUtils.add(rel.replace(/\.ts$/, ''))
 }
 
 let fail = 0
@@ -140,7 +176,7 @@ for (const f of files) {
   if (!NO_DOM_VALUES.has(layerOf(f))) continue
   const code = stripComments(readFileSync(f, 'utf8'))
   code.split(/\r?\n/).forEach((line, i) => {
-    if (DOM_VALUE_RE.test(line)) {
+    if (DOM_GLOBAL_VALUE_RE.test(line)) {
       domHits++
       bad(`${relative(ROOT, f).split(sep).join('/')}:${i + 1} 引用了 DOM 全局值：${line.trim().slice(0, 80)}`)
     }
