@@ -12,7 +12,7 @@ const win = (): Record<string, unknown> => g.window as Record<string, unknown>
  *
  * 这是本文件存在的前提：早期版本用模块级 `const hasWindow = ...` 捕获环境，
  * 值会在 import 时固化，测试里 `installDom()`（晚于 import）根本不生效 ——
- * 于是它长期没有单测，也纵容了 5 个零引用函数活到 0.5.0（见下方最后一条用例）。
+ * 于是它长期没有单测，也纵容了 5 个零引用函数活到 0.6.0（见下方最后一条用例）。
  */
 describe('sniffer：只问能力，不问身份', () => {
   let dom: Dom

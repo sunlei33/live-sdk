@@ -4,8 +4,8 @@
  *
  * ── 探测原则：只问能力，不问身份 ──
  *
- * 本模块**不提供 UA 嗅探**。`isIOS` / `isSafari` / `isAndroid` 曾在 0.5.0 之前存在，
- * 现已删除 —— 因为全仓已无任何 UA 分支，平台差异一律改由能力判定承担
+ * 本模块**不提供 UA 嗅探**。`isIOS` / `isSafari` / `isAndroid` 曾在 0.5.0 及更早版本存在，
+ * 已于 0.6.0 删除 —— 因为全仓已无任何 UA 分支，平台差异一律改由能力判定承担
  * （`canPlayType()` / `'MediaSource' in window` / `typeof el.webkitEnterFullscreen === 'function'`，
  * 见 `fullscreen.ts`）。**UA 会骗人，能力不会**：iPadOS 会伪装成 macOS、
  * Chrome/Edge 的 UA 里都含 `Safari`，基于 UA 的分支必然在某个版本上失效。

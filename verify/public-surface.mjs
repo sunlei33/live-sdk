@@ -49,7 +49,7 @@ export const UI = [
   'mountDefaultUI',
 ]
 
-/** 命名空间成员（`sniffer.*`）。只保留能力探测 —— UA 嗅探已于 0.5.0 删除。 */
+/** 命名空间成员（`sniffer.*`）。只保留能力探测 —— UA 嗅探已于 0.6.0 删除。 */
 export const SNIFFER = ['canPlayNativeHLS', 'canPlayNativeMP4', 'supportsMSE', 'supportsManagedMediaSource']
 
 /** `Events` 枚举成员（19 个，`COMMAND` 为统一命令观测） */

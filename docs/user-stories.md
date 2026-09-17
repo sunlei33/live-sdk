@@ -702,6 +702,41 @@
 
 ---
 
+## 十五、破坏性变更（0.6.0）
+
+> 本节的两条都是**移除**。判据相同：被移除的东西要么已被更好的机制取代，要么不属于 SDK 的核心职责。
+> 升级前请对照自查 —— 两者都不会在编译期以外的地方报错（JS 接入方尤其要看）。
+
+### US-49 `sniffer` 只保留能力探测（UA 嗅探函数已移除）
+
+- **目标**：平台差异一律用能力判定，SDK 不再对外提供 UA 嗅探函数（避免诱导接入方写回平台分支）。
+- **配置**：默认。
+- **交互**：
+  1. `import { sniffer } from '@fancaf/live-sdk'`，取 `Object.keys(sniffer)`。
+  2. 对能力探测函数逐个断言：`supportsMSE()` / `supportsManagedMediaSource()` / `canPlayNativeHLS(video)` / `canPlayNativeMP4(video)`。
+- **预期**：
+  1. `sniffer` **恰好只有 4 个成员**，即上述 4 个能力探测函数。
+  2. `isIOS` / `isSafari` / `isAndroid` / `supportsH264` / `canAutoplay` **均不存在**（这 5 个在 0.5.0 及更早版本存在，0.6.0 移除）。
+  3. **迁移对照**：过去 `if (isIOS()) { video.webkitEnterFullscreen() }` → 现在 `if (typeof video.webkitEnterFullscreen === 'function')`；过去用 `canAutoplay()` 预判起播可行性 → 现在不需要预判，SDK 在运行时处理（`playIntent` + 捕获 `NotAllowedError` 后回滚快照），预探测反而会误判（探测时的手势状态 ≠ 真正起播时的手势状态）。
+  4. 移除的 5 个函数在 0.5.0 及更早版本中**本就零引用零测试**（占该文件 51%），SDK 内部从未调用 —— 因此移除只影响直接引用过它们的接入方代码。
+  5. 该变更由 `verify/exports.mjs`（公开面形状精确集合比对）与 `verify/surface.mjs`（公开面活性普查）共同守住：以后再出现「零消费者的公开导出」或「静默改名/删除」，构建即失败。
+
+### US-50 上报适配器不再内置（第三方绑定移出核心）
+
+- **目标**：核心只保留上报**通道契约**（`ReporterPlugin`），绑定具体第三方平台的适配器由接入方实现 —— 与「SDK 只做把直播播出来这一件事」的边界一致。
+- **配置**：不注册任何上报插件（默认只随 `preset.live` 装配 `ConsoleReporter`）。
+- **交互**：
+  1. `import * as sdk from '@fancaf/live-sdk'`，检查 `SentryReporter` 是否为导出。
+  2. 按 `examples/reporter-sentry.ts` 的样板实现自定义上报插件并 `registerPlugin`。
+- **预期**：
+  1. **`SentryReporter` 与 `SentryLike` 不再由 SDK 导出**（0.5.0 曾随主入口导出）。
+  2. 参考实现位于 `examples/reporter-sentry.ts`（仓库内，**不随 npm 包分发**），接入方可直接复制。
+  3. 该样板**受双重保护**，不会腐烂：`examples/tsconfig.json` 使 `npm run verify` 会编译它；`test/reporter-sentry-example.test.ts` 直接 import 它并断言行为（而非仅类型）。
+  4. 样板内不可省的三个点（缺失即静默丢数据，详见 US-26）：`record.data` 必须包在 `extra` 下、`level` 需 `'warn' → 'warning'` 映射、`extra.code` 带上错误码。
+  5. 自定义上报插件收到的载荷形状与事件通道**信息对等**（`type` / `code` / `level` / `data.domain` / `data.diagnostic` / `time`），见 US-38。
+
+---
+
 ## 附录：验收环境建议
 | 项 | 建议 |
 |---|---|

@@ -606,17 +606,24 @@ player.registerPlugin(SentryReporter, { sentry: Sentry })
 
 ## 文档
 
-- [用户故事（验收用例）](./docs/user-stories.md) —— 50 条用例，格式：目标 / 配置 / 交互 / 预期
+- [用户故事（验收用例）](./docs/user-stories.md) —— 52 条用例，格式：目标 / 配置 / 交互 / 预期
 - [与 xgplayer 的对比分析](./docs/vs-xgplayer.md) —— 选型边界与逐项差异
 
 ## 开发
 
 ```bash
 npm install
+npm run clean         # 清空 dist（build 已内置，无需手动执行）
 npm run build         # 构建 core / ui / react / vue + 生成 d.ts
 npm run verify        # 类型契约校验 + 导出符号校验 + 运行时冒烟
 npm run typecheck     # 仅类型检查
 ```
+
+> **`build` 会先清空 `dist/`** —— 4 个 vite 配置串行写入同一个 `dist`（故都是 `emptyOutDir: false`），
+> `tsc --emitDeclarationOnly` 也不清理输出目录，因此**历史上没有任何一步会删旧文件**。
+> 后果是被删除/改名的源文件会在 `dist` 留下孤儿，而 `npm pack` 打的正是磁盘上的 `dist` ——
+> 孤儿会随包发布（0.6.0 发布前实测：`dist/reporter/SentryReporter.d.ts` 仍在，而该类已从源码删除）。
+> 现在由 `npm run clean` 修根因、`verify/artifacts.mjs` 做第二层校验。
 
 ### 测试
 
@@ -636,18 +643,26 @@ npm run verify:all    # 全链路：单测 → 构建 → 冒烟 → E2E
 > 国内网络拉浏览器内核慢时，可加镜像：
 > `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright npm run e2e:install`
 
-E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重、近尾 `ended` 判定、Pointer Events、销毁清理），通过注入 `MockKernel` 驱动异常分支，不依赖真实直播流，因此 CI 上稳定不 flaky。选 Playwright 的关键理由之一是它**自带 WebKit**——这是唯一能覆盖 Safari 原生 HLS 回退路径（`NativeKernel`）的引擎。
+E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重、近尾 `ended` 判定、Pointer Events、销毁清理），通过注入 `MockKernel` 驱动异常分支，不依赖真实直播流，因此**不依赖网络**。选 Playwright 的关键理由之一是它**自带 WebKit**——这是唯一能覆盖 Safari 原生 HLS 回退路径（`NativeKernel`）的引擎。
 
-`npm run verify` 里还有三道**普查式**的门，专门拦「声明了、导出了，但其实没接线 / 没人用」这类静态检查拦不住的失效：
+> 已知 flaky：**本地全量跑**（6 worker、`retries: 0`）时「断流恢复」的时序断言偶发失败 —— 实测 2 次全量跑各失败 1 例，而同用例隔离运行 `--repeat-each=3` 为 6/6、复跑全量 18/18。属并行下的时序敏感，与代码改动无关。CI 用 `workers: 1` + `retries: 2`（见 `playwright.config.ts`），不受影响；定位方式见技术实现档案 §8.10。
+
+`npm run verify` 里还有四道**静态门**，专门拦「声明了、导出了，但其实没接线 / 没人用 / 没打进包」这类静态检查拦不住的失效：
 
 | 门 | 拦什么 | 加它的原因 |
 |---|---|---|
 | `verify/events.mjs` 事件活性 | 每个 `Events` 枚举成员必须至少有一个真实 `emit` 派发点，**零派发即构建失败** | 「`on()` 注册会成功、但永不触发」的静默失效，类型校验、冒烟、E2E、单测**都拦不住**（详见技术实现档案 §9） |
 | `verify/exports.mjs` 公开面形状 | 顶层导出 / `sniffer` 成员 / 枚举与常量内容与清单**精确集合比对**，缺失与多余都失败 | 原实现只问「名字在不在」，于是**成员级的删除/改名完全不被拦住** |
-| `verify/surface.mjs` 公开面活性 | 清单里每个公开名在 `src/` 必须有消费者，或有测试覆盖；两者皆无须登记豁免并写理由 | `sniffer` 曾有 5 个函数零引用零测试、占该文件 51%，一路活到 0.5.0 才被人工发现 |
+| `verify/surface.mjs` 公开面活性 | 清单里每个公开名在 `src/` 必须有消费者，或有测试覆盖；两者皆无须登记豁免并写理由 | `sniffer` 曾有 5 个函数零引用零测试、占该文件 51%，一路活到 0.6.0 才被人工发现（随 0.6.0 删除） |
+| `verify/artifacts.mjs` 产物卫生 | `dist/**/*.d.ts` 必须能对应到 `src/**/*.ts`；`package.json` 的 `exports` 目标必须存在；`dist/*.es.js` 必须都被 `exports` 引用 | 构建链**不清理 `dist`**，删掉/改名的源文件会留下孤儿声明，而 `npm pack` 打的正是磁盘上的 `dist` |
 
-> 前两者**必须成对**：形状门把新增导出「逼」进清单（`verify/public-surface.mjs`），活性门再审清单里每一项的活性。
-> 单用任一个都有盲区 —— 只用形状门，那 5 个死函数当年照样全绿；只用活性门，未登记的新导出会被直接跳过。
+> `events` / `exports` / `surface` 三者的**盲区各不相同**，也正因此才会三个都要：
+> `events` 只管事件有没有派发点、不看导出；`exports` 只管导出名字对不对、不看有没有人用；
+> `surface` 只管有没有人用、不管名字是否合规（新增的未登记导出会被它直接跳过）。
+>
+> `exports` 与 `surface` 还**必须成对**：形状门把新增导出「逼」进清单（`verify/public-surface.mjs`），
+> 活性门再审清单里每一项的活性。单用任一个都有盲区 —— 只用形状门，那 5 个死函数当年照样全绿；
+> 只用活性门，未登记的新导出会被直接跳过。
 
 ## 许可
 
@@ -1251,17 +1266,25 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ## Documentation
 
-- [User stories (acceptance cases)](./docs/user-stories.md) — 50 cases in the format: goal / config / interaction / expectation
+- [User stories (acceptance cases)](./docs/user-stories.md) — 52 cases in the format: goal / config / interaction / expectation
 - [Comparison with xgplayer](./docs/vs-xgplayer.md) — selection boundaries and an item-by-item difference list
 
 ## Development
 
 ```bash
 npm install
+npm run clean         # wipe dist (already part of build; no need to run manually)
 npm run build         # build core / ui / react / vue + generate d.ts
 npm run verify        # type-contract check + export-symbol check + runtime smoke
 npm run typecheck     # type checking only
 ```
+
+> **`build` wipes `dist/` first.** The four vite configs write into the same `dist` sequentially (hence all
+> set `emptyOutDir: false`), and `tsc --emitDeclarationOnly` never cleans its output directory either — so
+> **nothing in the pipeline used to delete stale files**. Deleted or renamed sources therefore left orphans
+> in `dist`, and since `npm pack` packs whatever is on disk, those orphans shipped with the package
+> (measured right before the 0.6.0 release: `dist/reporter/SentryReporter.d.ts` was still there, for a class
+> already removed from the source). `npm run clean` fixes the root cause; `verify/artifacts.mjs` is the second line of defence.
 
 ### Testing
 
@@ -1281,9 +1304,21 @@ npm run verify:all    # full chain: unit tests → build → smoke → E2E
 > If fetching browser engines is slow on your network, use a mirror:
 > `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright npm run e2e:install`
 
-E2E covers the cross-layer chain "kernel → Player → UI" (reconnection and de-duplication, near-tail `ended` detection, Pointer Events, destroy cleanup). It drives the failure branches by injecting a `MockKernel` rather than depending on a real live stream, so it is stable and non-flaky in CI. One key reason for choosing Playwright is that it **ships WebKit** — the only engine that can cover Safari's native HLS fallback path (`NativeKernel`).
+E2E covers the cross-layer chain "kernel → Player → UI" (reconnection and de-duplication, near-tail `ended` detection, Pointer Events, destroy cleanup). It drives the failure branches by injecting a `MockKernel` rather than depending on a real live stream, so it **needs no network**. One key reason for choosing Playwright is that it **ships WebKit** — the only engine that can cover Safari's native HLS fallback path (`NativeKernel`).
+
+> Known flake: in **local full runs** (6 workers, `retries: 0`) the timing assertions in the "stream interruption recovery" spec fail intermittently — observed twice (1 failure each), while the same spec passed 6/6 with `--repeat-each=3` in isolation and the full suite passed 18/18 on a re-run. It is parallelism/timing sensitivity, unrelated to code changes. CI uses `workers: 1` + `retries: 2` (see `playwright.config.ts`) and is unaffected; see the implementation dossier §8.10.
 
 `npm run verify` also runs an **events liveness census** (`verify/events.mjs`): it counts the actual `emit` sites for every `Events` enum member across `src/`, and **fails the build on zero dispatch sites**. It exists because silent failures of the form "declared, exported, `on()` succeeds, but never fires" slip past type checks, smoke tests, E2E and unit tests alike (see the implementation dossier §9).
+
+Three more static gates guard adjacent blind spots:
+
+| Gate | What it blocks | Why it exists |
+|---|---|---|
+| `verify/exports.mjs` public-surface shape | exact set comparison of top-level exports / `sniffer` members / enum members against the manifest — both **missing and extra** names fail | the previous version only asked "is the name present", so member-level deletions and renames were never caught |
+| `verify/surface.mjs` public-surface liveness | every name in the manifest must have a consumer in `src/` or test coverage; otherwise it must be registered in an exemption list with a written reason | `sniffer` had 5 zero-reference, zero-test functions (51% of the file) that survived until 0.6.0 |
+| `verify/artifacts.mjs` artifact hygiene | every `dist/**/*.d.ts` must map to a `src/**/*.ts`; every `package.json` `exports` target must exist; every `dist/*.es.js` must be referenced by `exports` | nothing in the build pipeline cleans `dist`, so deleted/renamed sources leave orphan declarations — and `npm pack` packs exactly what is on disk |
+
+> `exports` and `surface` are **a pair**: the shape gate forces new exports into the manifest (`verify/public-surface.mjs`), and the liveness gate then audits each entry. Either one alone has a blind spot — with the shape gate only, those 5 dead functions were green for years; with the liveness gate only, newly added but unregistered exports are skipped entirely.
 
 ## License
 
