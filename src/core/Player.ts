@@ -186,18 +186,18 @@ export class Player {
     }
     this.state = new StateStore(initial)
 
-    // 6. 插件管理
+    // 5. 插件管理
     this.plugins = new PluginManager(this)
 
-    // 7. 装载预设插件
+    // 6. 装载预设插件
     this.applyPreset()
 
-    // 8. 绑定 env / 状态机 / media 事件
+    // 7. 绑定 env / 状态机 / media 事件
     this.bindEnv()
     this.stateMachine.onChange((next) => this.onStateChange(next))
     this.bindMediaEvents()
 
-    // 9. 缺省地址 + 自动起播
+    // 8. 缺省地址 + 自动起播
     if (this.config.url && this.config.autoplay) {
       void this.play({
         url: this.config.url,
@@ -209,6 +209,19 @@ export class Player {
 
   // ═══════════════ 命令契约（PlayerCommands） ═══════════════
 
+  /**
+   * 起播。结构分三相（此前是一个整体）：
+   *
+   * | 相 | 职责 | 位置 |
+   * |---|---|---|
+   * | ① 门卫 | 销毁检查 / 零尺寸自检 / `reqId` 竞态 / before 钩子 | 本方法内 |
+   * | ② 恢复播放 | 无参 `play()` 且已起播过 → **只唤醒媒体、不重新拉流** | `resumePlayback` |
+   * | ③ 起播新流 | 解析配置 → 重置会话与意图 → 建内核并加载 | `startPlayback` |
+   *
+   * ②③ 各自负责自己的「钩子收尾 + `COMMAND` 事件」——**刻意不合并**，因为它们本就不对称：
+   * ② 被中断（AbortError）时不调 `hookAfter`；③ 解析失败要抛 `fatal` 错误。
+   * ① 的三条早返回路径只报 `applied=false`，与后两相无关。
+   */
   async play(input?: PlayInput): Promise<void> {
     this.emitCommand('play', 'before')
     if (this.destroyed) {
@@ -235,34 +248,53 @@ export class Player {
     // 无参 play()：若已成功起播过（hasLoaded），语义是「恢复播放」而非「重新起播」——
     // 对应状态机 paused →(play)→ playing，不重新拉流（直播恢复不该重建 buffer）。
     if (input === undefined && this.hasLoaded) {
-      // 乐观更新：`playing` 事件是异步派发的，若等到 await 之后再改快照，
-      // 调用方（含 PlayButton 的同步读取）会拿到过期的 playing=false。
-      // 这里先同步纠正快照，失败时再回滚。
-      this.playIntent = true
-      this.mediaPaused = false
-      this.state.set({ playing: true })
-      try {
-        await this.surface.play()
-      } catch (err) {
-        // 被中断（AbortError）视为正常竞态；被拦截（NotAllowedError）回滚后静默。
-        if (this.handlePlayRejection(err)) {
-          this.emitCommand('play', 'after', false)
-          return
-        }
-        // 起播失败（如自动播放被拦截）：回滚快照与意图，交由接入方处理
-        this.playIntent = false
-        this.mediaPaused = true
-        this.state.set({ playing: false })
-        const e = this.makeError(ERROR_CODE.PLAY_FAILED, (err as Error).message, false)
-        this.dispatchError(e)
-        this.emitCommand('play', 'after', false)
-        throw err
-      }
-      await this.hookAfter('play', hookCtx, true)
-      this.emitCommand('play', 'after', true)
+      await this.resumePlayback(hookCtx)
       return
     }
+    await this.startPlayback(input, reqId, hookCtx)
+  }
 
+  /**
+   * ② 恢复播放：**只唤醒媒体，不重新拉流**（对应状态机 paused →(play)→ playing；
+   * 直播恢复不该重建 buffer）。
+   *
+   * 自行收尾钩子与 `COMMAND` 事件 —— 见 `play()` 的结构说明。
+   */
+  private async resumePlayback(hookCtx: CommandHookContext): Promise<void> {
+    // 乐观更新：`playing` 事件是异步派发的，若等到 await 之后再改快照，
+    // 调用方（含 PlayButton 的同步读取）会拿到过期的 playing=false。
+    // 这里先同步纠正快照，失败时再回滚。
+    this.playIntent = true
+    this.mediaPaused = false
+    this.state.set({ playing: true })
+    try {
+      await this.surface.play()
+    } catch (err) {
+      // 被中断（AbortError）视为正常竞态；被拦截（NotAllowedError）回滚后静默。
+      if (this.handlePlayRejection(err)) {
+        this.emitCommand('play', 'after', false)
+        return
+      }
+      // 起播失败（如自动播放被拦截）：回滚快照与意图，交由接入方处理
+      this.playIntent = false
+      this.mediaPaused = true
+      this.state.set({ playing: false })
+      const e = this.makeError(ERROR_CODE.PLAY_FAILED, (err as Error).message, false)
+      this.dispatchError(e)
+      this.emitCommand('play', 'after', false)
+      throw err
+    }
+    await this.hookAfter('play', hookCtx, true)
+    this.emitCommand('play', 'after', true)
+  }
+
+  /**
+   * ③ 起播新流：解析配置 → 重置会话与意图 → 建内核并加载。
+   *
+   * `reqId` 用来丢弃**已被更新的 `play()` 取代**的过期请求（before 钩子 await 期间可能又进来一次）。
+   * 自行收尾钩子与 `COMMAND` 事件（三条失败/过期路径各自 `applied=false`）—— 见 `play()` 的结构说明。
+   */
+  private async startPlayback(input: PlayInput | undefined, reqId: number, hookCtx: CommandHookContext): Promise<void> {
     let cfg: PlayConfig
     try {
       cfg = await this.resolveConfig(input)
@@ -278,32 +310,7 @@ export class Player {
     }
 
     this.currentPlayConfig = cfg
-    const muted = cfg.muted ?? this.config.muted ?? false
-    this.surface.muted = muted
-    this.applyPoster(cfg.poster)
-    // 新一轮起播：进度归零，等待 loadedmetadata/timeupdate 回填
-    this.progressSecond = -1
-    // 新一轮起播 = 新一轮会话：累计指标清零、备用流标记复位。
-    // **必须在 transition('load') 之前** —— onTransition 会在状态迁移时结算
-    // 「进行中的 playing / stalled 时段」，若先迁移再重置，旧会话的尾巴会被算进新会话。
-    this.session.reset()
-    // 缓冲档位节流状态一并清零：新会话的第一份 bufferInfo 必须能派发出去，
-    // 否则「起播瞬间的低缓冲」会因与上一轮档位相同而被静默吞掉。
-    // 注：这是**缓冲观测**的游标，与会话指标无关，故仍留在 Player。
-    this.bufferLevel = -1
-    this.state.set({ muted, currentTime: 0, duration: 0, usingBackup: false })
-    this.startLivePollingIfNeeded()
-
-    this.retryCount = 0
-    this.mediaPaused = false // 新一轮起播，重置暂停兜底标志
-    // 播放意图 = 本次起播是否「自动开始播放」。
-    // `PlayConfig.autoplay: false` 的语义是「只加载、不自动播」（典型场景：先呈现封面图，
-    // 等用户手势再播），因此意图为负 —— 不自动 play()、按钮保持「播放」态；
-    // 之后业务显式调用 `play()`（无参）走恢复分支，再把意图转正。
-    // 缺省（undefined）视为 true：调用 play() 本身就是播放意图，保持既有行为不变。
-    this.playIntent = cfg.autoplay !== false
-    this.emit(Events.LOAD_START, { url: cfg.url })
-    this.stateMachine.transition('load')
+    this.beginNewSession(cfg)
 
     try {
       const kernel = this.ensureKernel(cfg.url)
@@ -320,6 +327,40 @@ export class Player {
     // 注：`autoplay: false` 时 applied 仍为 true —— 命令完成了它被要求的事（加载但不自动播），
     // 不是「空转」。要判断「是否真的开始播放」，看 `PlayerState.playing`。
     this.emitCommand('play', 'after', true)
+  }
+
+  /**
+   * 把播放器重置到「新一轮会话」的起点（起播新流时调用一次）。
+   *
+   * 集中在一处的原因：这里的顺序**有依赖**，散在 `play()` 里时最容易改错 ——
+   * 尤其是 `session.reset()` **必须早于** `stateMachine.transition('load')`：
+   * 状态迁移会触发 `SessionMetrics.onTransition` 结算「进行中的 playing / stalled 时段」，
+   * 若先迁移再重置，旧会话的尾巴就会被算进新会话。
+   */
+  private beginNewSession(cfg: PlayConfig): void {
+    const muted = cfg.muted ?? this.config.muted ?? false
+    this.surface.muted = muted
+    this.applyPoster(cfg.poster)
+    // 进度归零，等待 loadedmetadata / timeupdate 回填
+    this.progressSecond = -1
+    // 会话累计指标清零（须早于 transition('load')，见方法注释）
+    this.session.reset()
+    // 缓冲档位节流状态一并清零：新会话的第一份 bufferInfo 必须能派发出去，
+    // 否则「起播瞬间的低缓冲」会因与上一轮档位相同而被静默吞掉。
+    // 注：这是**缓冲观测**的游标，与会话指标无关，故不随 session 走。
+    this.bufferLevel = -1
+    this.state.set({ muted, currentTime: 0, duration: 0, usingBackup: false })
+    this.startLivePollingIfNeeded()
+    this.retryCount = 0
+    this.mediaPaused = false // 新一轮起播，重置暂停兜底标志
+    // 播放意图 = 本次起播是否「自动开始播放」。
+    // `PlayConfig.autoplay: false` 的语义是「只加载、不自动播」（典型场景：先呈现封面图，
+    // 等用户手势再播），因此意图为负 —— 不自动 play()、按钮保持「播放」态；
+    // 之后业务显式调用 `play()`（无参）走恢复分支，再把意图转正。
+    // 缺省（undefined）视为 true：调用 play() 本身就是播放意图，保持既有行为不变。
+    this.playIntent = cfg.autoplay !== false
+    this.emit(Events.LOAD_START, { url: cfg.url })
+    this.stateMachine.transition('load')
   }
 
   pause(): void {
@@ -900,6 +941,11 @@ export class Player {
   private bindMediaEvents(): void {
     // 媒体事件一律经 `MediaSurface.on` 订阅 —— core 不再写 `el.addEventListener`
     // （否则等于把「媒体是 DOM 元素」写回 core；这条是平台接缝测试发现的）。
+    //
+    // 本方法只保留「事件名 → 处理」的对照，力求一眼看完我们监听了哪些事件；
+    // **非平凡的处理逻辑一律提为具名方法**（`onMediaEnded` / `onMediaVolumeChange` /
+    // `onMediaRateChange` / `onNativeMediaError`），与既有的 `onMediaPlay` / `onMediaPlaying` /
+    // `onMediaPause` / `onStall` 保持同一形状 —— 名字比内联块更能承载领域知识。
     const on = (name: MediaEventName, fn: () => void) => {
       this.disposedSubs.push(this.surface.on(name, fn))
     }
@@ -922,35 +968,55 @@ export class Player {
     on('pause', () => this.onMediaPause())
     on('waiting', () => this.onStall())
     on('stalled', () => this.onStall())
-    on('ended', () => {
-      this.playIntent = false // 播完 = 意图终止，重连逻辑不得复活
-      this.mediaPaused = true
-      this.stateMachine.transition('ended')
-      this.emit(Events.ENDED)
-    })
-    on('volumechange', () => this.state.set({ volume: this.surface.volume, muted: this.surface.muted }))
-    // 倍速也可能被外部（直接操作媒体）改动：跟随同步并去重，避免重复渲染
-    on('ratechange', () => {
-      const rate = this.surface.playbackRate
-      if (rate !== this.state.get().playbackRate) this.state.set({ playbackRate: rate })
-    })
-    on('error', () => {
-      // 原生媒体错误（NativeKernel / 渐进式直连路径）。
-      // 错误码是规范里的**定值枚举**、语义可靠 → 按 code 分派
-      // （详见 utils/errors.ts#mapMediaErrorCode）。
-      // 早期实现一律映射成 network_error，会把解码 / 格式类错误打进「接口与 CDN」，
-      // 使接入方按错误码做的分类上报整体错位。
-      const mediaError = this.surface.error()
-      const mapped = mapMediaErrorCode(mediaError?.code, mediaError?.message)
-      if (!mapped) return // code=1：换源 / 销毁引发的中止，不是故障
-      this.dispatchError(this.makeError(mapped.code, mediaError?.message || '媒体加载失败', mapped.fatal))
-    })
+    on('ended', () => this.onMediaEnded())
+    on('volumechange', () => this.onMediaVolumeChange())
+    on('ratechange', () => this.onMediaRateChange())
+    on('error', () => this.onNativeMediaError())
 
     // —— 全屏状态同步 ——
     // **两个来源在平台侧合一**：Web 的「`document` 上的标准/前缀 fullscreenchange」
     // 与「iOS 原生视频全屏的 `webkitbegin/endfullscreen`（不派发 fullscreenchange）」。
     // core 只认 `fullscreenchange` 一个事件名，也不必知道 `document` 的存在。
     on('fullscreenchange', () => this.syncFullscreen())
+  }
+
+  /**
+   * 播放结束（媒体自然播完）。
+   *
+   * `playIntent = false` 是关键：**播完 = 用户意图终止**，重连逻辑不得把它复活
+   * （否则近尾结束会被当成断流，触发无意义的重连）。
+   */
+  private onMediaEnded(): void {
+    this.playIntent = false
+    this.mediaPaused = true
+    this.stateMachine.transition('ended')
+    this.emit(Events.ENDED)
+  }
+
+  /** 音量 / 静音变化（含外部直接操作媒体）→ 跟随同步到快照。 */
+  private onMediaVolumeChange(): void {
+    this.state.set({ volume: this.surface.volume, muted: this.surface.muted })
+  }
+
+  /** 倍速也可能被外部（直接操作媒体）改动：跟随同步并去重，避免重复渲染。 */
+  private onMediaRateChange(): void {
+    const rate = this.surface.playbackRate
+    if (rate !== this.state.get().playbackRate) this.state.set({ playbackRate: rate })
+  }
+
+  /**
+   * 原生媒体错误（`NativeKernel` / 渐进式直连路径）。
+   *
+   * `<video>.error` 是 `MediaError`，其 `code` 是规范里的**定值枚举**、语义可靠 → 按 code 分派
+   * （详见 `utils/errors.ts#mapMediaErrorCode`）。
+   * 早期实现一律映射成 `network_error`，会把解码 / 格式类错误打进「接口与 CDN」，
+   * 使接入方按错误码做的分类上报整体错位。
+   */
+  private onNativeMediaError(): void {
+    const mediaError = this.surface.error()
+    const mapped = mapMediaErrorCode(mediaError?.code, mediaError?.message)
+    if (!mapped) return // code=1：换源 / 销毁引发的中止，不是故障
+    this.dispatchError(this.makeError(mapped.code, mediaError?.message || '媒体加载失败', mapped.fatal))
   }
 
   /** 把全屏真实状态同步到快照（去重后写，避免重复事件驱动无意义的重渲染）。 */
