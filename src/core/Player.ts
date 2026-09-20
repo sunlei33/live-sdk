@@ -3,6 +3,7 @@ import { StateMachine } from './StateMachine'
 import { StateStore } from './StateStore'
 import { Hooks } from './Hooks'
 import { PluginManager } from './PluginManager'
+import { QualityController } from './QualityController'
 import { SessionMetrics } from './SessionMetrics'
 import {
   Events,
@@ -33,7 +34,6 @@ import type {
   Kernel,
   KernelCapabilities,
   KernelConstructor,
-  LevelInfo,
   MediaEventName,
   MediaSurface,
   NetworkConfig,
@@ -48,7 +48,6 @@ import type {
   PlayerState,
   Plugin,
   PluginInput,
-  Quality,
   ReportRecord,
   RetryDiagnostic,
   SessionReport,
@@ -99,16 +98,9 @@ export class Player {
   private playRequestId = 0
   private retryCount = 0
   private currentPlayConfig: PlayConfig | null = null
-  private qualityMap = new Map<number, number>() // business id → levelIndex
-  private serverFeatures: Record<FeatureKey, SideState> = {
-    lowLatency: 'unknown',
-    abr: 'unknown',
-    qualitySwitch: 'unknown',
-    drm: 'unknown',
-    // airplay 是纯客户端/平台能力，不依赖服务端 manifest → 服务端侧无条件满足（恒 supported），
-    // 不能填 'unknown'——那会被误读成「尚未探测」，从而在 matched 里留下无意义的未对齐态。
-    airplay: 'supported',
-  }
+  // 清晰度映射表 + 服务端能力声明：两者都是「随内核/清单重建」的派生数据，
+  // 已抽为独立单元（`core/QualityController.ts`），它只持有数据与纯计算、不产生副作用。
+  private quality = new QualityController()
   private timers = new Set<number>()
   private destroyed = false
   kernelReady = false
@@ -380,7 +372,7 @@ export class Player {
         this.emit(Events.ABR_CHANGE, { level: 'auto' })
         applied = true
       } else {
-        const idx = this.qualityMap.get(id)
+        const idx = this.quality.levelIndexOf(id)
         if (idx !== undefined) {
           this.kernel.switchQuality(idx)
           this.state.set({ currentQuality: id })
@@ -673,7 +665,7 @@ export class Player {
       airplay: caps.nativeFallback ? 'degraded' : 'supported',
     }
     const features: FeatureStatus[] = (Object.keys(client) as FeatureKey[]).map((feature) =>
-      matchFeature(feature, client[feature], this.serverFeatures[feature]),
+      matchFeature(feature, client[feature], this.quality.serverState(feature)),
     )
     const matched = features.filter((f) => f.matched).length
     return { features, summary: { matched, mismatched: features.length - matched } }
@@ -878,7 +870,8 @@ export class Player {
 
   private onManifestParsed(data?: unknown): void {
     this.clearLoadTimeout()
-    this.probeServerFeatures(data)
+    // 服务端能力声明：由清单载荷 + 当前 level 数量推导（内核只在此处被读一次）
+    this.quality.probeServer(data, this.kernel?.getLevels?.()?.length ?? 0)
     this.updateQualities()
     this.stateMachine.transition('manifestParsed')
     this.emit(Events.MANIFEST_PARSED, data)
@@ -1470,64 +1463,21 @@ export class Player {
 
   // ═══════════════ 内部：清晰度映射（§4.3） ═══════════════
 
+  /**
+   * 重建档位映射并写入快照。
+   *
+   * 映射规则（height 主键 → bitrate 最近邻 → 剔除）与失败告警都在
+   * `QualityController.syncLevels()` 里，本方法只负责「取两个入参 + 写快照」。
+   */
   private updateQualities(): void {
     const business = this.currentPlayConfig?.quality ?? []
     const levels = this.kernel?.getLevels?.() ?? []
     if (levels.length === 0) {
+      this.quality.syncLevels(business, levels) // 清空映射
       this.state.set({ qualities: [], currentQuality: null })
       return
     }
-    const map = new Map<number, number>()
-    const valid: Quality[] = []
-    for (const q of business) {
-      const idx = this.matchQuality(q, levels)
-      if (idx >= 0) {
-        map.set(q.id, idx)
-        valid.push(q)
-      } else {
-        logger.warn(`[live-sdk] 档位映射失败，已剔除：id=${q.id}`)
-      }
-    }
-    this.qualityMap = map
-    this.state.set({ qualities: valid })
-  }
-
-  private matchQuality(q: Quality, levels: LevelInfo[]): number {
-    if (q.height != null) {
-      const hit = levels.find((l) => l.height === q.height)
-      if (hit) return hit.index
-    }
-    if (q.bitrate != null) {
-      let best = -1
-      let bestDiff = Infinity
-      for (const l of levels) {
-        const d = Math.abs(l.bitrate - q.bitrate)
-        if (d < bestDiff) {
-          bestDiff = d
-          best = l.index
-        }
-      }
-      return best
-    }
-    return -1
-  }
-
-  // ═══════════════ 内部：服务端能力探测（§4.7） ═══════════════
-
-  private probeServerFeatures(data?: unknown): void {
-    const d = (data ?? {}) as { levels?: unknown[]; hasLL?: boolean; levelsInfo?: unknown }
-    const levels = this.kernel?.getLevels?.() ?? []
-    const multi = levels.length > 1
-    const hasLL = (d as { hasLL?: boolean }).hasLL === true
-    this.serverFeatures = {
-      lowLatency: hasLL ? 'supported' : 'absent',
-      abr: multi ? 'supported' : 'absent',
-      qualitySwitch: multi ? 'supported' : 'absent',
-      drm: 'absent',
-      // airplay 是纯客户端/平台能力，与 manifest 无关 → 服务端侧无条件满足（恒 supported）。
-      // 不用 'unknown'：那表示「尚未探测」，会污染 matched 口径（本轮修复的 bug 根因）。
-      airplay: 'supported',
-    }
+    this.state.set({ qualities: this.quality.syncLevels(business, levels) })
   }
 
   // ═══════════════ 内部：直播轮询 ═══════════════
