@@ -3,6 +3,7 @@ import { StateMachine } from './StateMachine'
 import { StateStore } from './StateStore'
 import { Hooks } from './Hooks'
 import { PluginManager } from './PluginManager'
+import { SessionMetrics } from './SessionMetrics'
 import {
   Events,
   ERROR_CODE,
@@ -139,22 +140,9 @@ export class Player {
   private latencyOverride: { target?: number; max?: number } | null = null
 
   // ─────────── 会话级累计指标（getSessionReport，见 types.ts#SessionReport） ───────────
-  // 全部以「已结算累计量 + 进行中时段起点」两段式记录：读的时候把进行中的一段
-  // 实时补上，不需要定时器轮询，也不会在暂停/卡顿时把时长算漏。
-  /** 本轮会话起播时刻（play() 新一轮起播时重置） */
-  private sessionLoadStartTime: number | null = null
-  /** 本轮会话首帧耗时（ms）；出首帧后不再改写，新一轮起播重置为 null */
-  private sessionFirstFrameCost: number | null = null
-  /** 已结算的「实际播放」累计时长（ms） */
-  private watchAccum = 0
-  /** 进入 playing 的时刻；非 playing 态为 null */
-  private watchSince: number | null = null
-  /** 已结算的卡顿累计时长（ms） */
-  private stallAccum = 0
-  /** 进入 stalled 的时刻；非 stalled 态为 null */
-  private stallSince: number | null = null
-  /** 本轮会话累计卡顿次数 */
-  private stallCount = 0
+  // 7 个字段与整套「清零 / 起记 / 结算 / 读」逻辑已抽为独立单元（`core/SessionMetrics.ts`）：
+  // 它自带完整生命周期，且只有 6 个方法碰它 —— 字段—方法引用矩阵里内聚度最高的一块。
+  private session = new SessionMetrics()
 
   /**
    * @param config 接入方配置
@@ -304,9 +292,13 @@ export class Player {
     // 新一轮起播：进度归零，等待 loadedmetadata/timeupdate 回填
     this.progressSecond = -1
     // 新一轮起播 = 新一轮会话：累计指标清零、备用流标记复位。
-    // **必须在 transition('load') 之前** —— onStateChange 会在状态迁移时结算
+    // **必须在 transition('load') 之前** —— onTransition 会在状态迁移时结算
     // 「进行中的 playing / stalled 时段」，若先迁移再重置，旧会话的尾巴会被算进新会话。
-    this.resetSession()
+    this.session.reset()
+    // 缓冲档位节流状态一并清零：新会话的第一份 bufferInfo 必须能派发出去，
+    // 否则「起播瞬间的低缓冲」会因与上一轮档位相同而被静默吞掉。
+    // 注：这是**缓冲观测**的游标，与会话指标无关，故仍留在 Player。
+    this.bufferLevel = -1
     this.state.set({ muted, currentTime: 0, duration: 0, usingBackup: false })
     this.startLivePollingIfNeeded()
 
@@ -652,48 +644,7 @@ export class Player {
    * 「记时间戳 → 配对收口 → 维护计数器」的样板代码，且极易在配对边界上算错。
    */
   getSessionReport(): SessionReport {
-    const now = Date.now()
-    return {
-      firstFrameCost: this.sessionFirstFrameCost,
-      stallCount: this.stallCount,
-      stallDuration: this.stallAccum + (this.stallSince !== null ? now - this.stallSince : 0),
-      watchTime: this.watchAccum + (this.watchSince !== null ? now - this.watchSince : 0),
-      loadStartTime: this.sessionLoadStartTime,
-    }
-  }
-
-  /**
-   * 重置会话级累计指标。**只由 `play()` 的新一轮起播调用**（见 `SessionReport` 会话边界）。
-   *
-   * 这里直接清零而不是先结算：会话既然要重新开始，旧会话那段进行中的时长本就应该
-   * 被丢弃；若先结算再清零等于白算一次，反而容易让人误以为「旧数据被带进新会话」。
-   * 读接口 `getSessionReport()` 自己会补上进行中的一段，所以清零不会造成漏计。
-   */
-  private resetSession(): void {
-    this.watchAccum = 0
-    this.watchSince = null
-    this.stallAccum = 0
-    this.stallSince = null
-    this.stallCount = 0
-    this.sessionLoadStartTime = Date.now()
-    this.sessionFirstFrameCost = null
-    // 缓冲档位节流状态一并清零：新会话的第一份 bufferInfo 必须能派发出去，
-    // 否则「起播瞬间的低缓冲」会因与上一轮档位相同而被静默吞掉。
-    this.bufferLevel = -1
-  }
-
-  /** 结算进行中的「实际播放」时段（幂等：无进行中时段时为空操作）。 */
-  private settleWatch(now: number): void {
-    if (this.watchSince === null) return
-    this.watchAccum += now - this.watchSince
-    this.watchSince = null
-  }
-
-  /** 结算进行中的卡顿时段（幂等）。 */
-  private settleStall(now: number): void {
-    if (this.stallSince === null) return
-    this.stallAccum += now - this.stallSince
-    this.stallSince = null
+    return this.session.report()
   }
 
   report(type: ReportRecord['type'], data: Record<string, unknown>): void {
@@ -1137,7 +1088,7 @@ export class Player {
   /**
    * 首帧信号入口（`loadeddata` / `canplay` 都会到，谁先到算谁）。拆成两步是因为
    * 它们服务两个**生命周期不同**的语义：
-   * - `markSessionFirstFrame()`：本轮会话的首帧耗时 —— **每次起播都要重新计**；
+   * - `session.markFirstFrame()`：本轮会话的首帧耗时 —— **每次起播都要重新计**；
    * - `emitFirstFrame()`：`FIRST_FRAME` 事件 + `plugins.readyAll()` —— 历史行为是
    *   **一次性闸门、二次起播不重置**（它兼作「插件可以开始工作了」的就绪信号，
    *   重复派发没有意义，且 `applyPoster` 的隐藏逻辑依赖这个特性）。
@@ -1146,18 +1097,8 @@ export class Player {
    * 永远不会记录首帧耗时（`firstFrameCost` 停在 null）。两者必须分开。
    */
   private onFirstFrameSignal(): void {
-    this.markSessionFirstFrame()
+    this.session.markFirstFrame()
     this.emitFirstFrame()
-  }
-
-  /**
-   * 记录本轮会话首帧耗时（幂等：一轮会话只记第一次）。
-   * 不依赖 `firstFrameEmitted` —— 见 `onFirstFrameSignal` 的注释。
-   */
-  private markSessionFirstFrame(): void {
-    if (this.sessionFirstFrameCost !== null) return
-    if (this.sessionLoadStartTime === null) return // 未经 play()（如直接操作 media），无起播基准
-    this.sessionFirstFrameCost = Date.now() - this.sessionLoadStartTime
   }
 
   // ═══════════════ 内部：接入期自检 ═══════════════
@@ -1282,19 +1223,9 @@ export class Player {
   private onStateChange(next: SessionState): void {
     if (next === 'paused' || next === 'playing') this.mediaPaused = next === 'paused'
 
-    // —— 会话级累计指标：进入 / 离开 playing、stalled 各在此收口 ——
-    // 关键设计：**离开路径统一在这里结算，而不是只在 RECOVERED 里累加**。
-    // 卡顿并不总以 `RECOVERED` 结束 —— 期间可能迁到 `error`（重连）、`ended`（近尾判完）、
-    // 或被用户 `pause`；漏了任何一条，那段卡顿时长就永久少计（且很难被发现）。
-    // 在此集中结算后，新增任何状态迁移路径都自动被覆盖。
-    const now = Date.now()
-    this.settleWatch(now)
-    this.settleStall(now)
-    if (next === 'playing') this.watchSince = now
-    if (next === 'stalled') {
-      this.stallCount++
-      this.stallSince = now
-    }
+    // 会话级累计指标（进入 / 离开 playing、stalled 的收口与结算）全部交给 SessionMetrics。
+    // 关键设计仍在那里：**离开路径统一结算**，而不是只在 RECOVERED 里累加 —— 详见其注释。
+    this.session.onTransition(next)
 
     // `playing` 快照 = 「呈现给用户的播放/暂停语义」，不是会话态的机械映射：
     //   - `playing`  → true
