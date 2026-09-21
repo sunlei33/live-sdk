@@ -127,6 +127,20 @@ export interface Kernel {
   getLevels?(): LevelInfo[] // 清晰度档位列表
   getCurrentLevel?(): number // 当前档位索引（-1=自动）
   setLiveLatency?(target: number, max: number): void // LL-HLS 运行时更新目标延迟
+  /**
+   * 当前媒体流**是否仍在直播**（时间轴还在增长）。判据由内核给出，**不要从 `duration` 推断**。
+   *
+   * **为什么 `duration` 不可靠**：原生 HLS（`NativeKernel`）直播下确为 `Infinity`，
+   * 但 MSE 路径下 hls.js **默认**（`liveDurationInfinity: false`）会把 `MediaSource.duration`
+   * 写成 playlist edge —— 于是直播流的 `duration` 也是**有限值**（且随滑窗递增），
+   * 与点播无法区分。hls.js 自己的 `details.live` 才是权威判据
+   * （语义 = playlist 未出现 `#EXT-X-ENDLIST`），且会随 playlist 重载**自动翻转**：
+   * 直播结束 → `false` → 时间轴变有限 → `seek()` 随之自然可用。
+   *
+   * **缺省**（`NativeKernel` 及自定义内核不实现）时 `Player` 回退到
+   * `!Number.isFinite(surface.duration)`，即旧行为，向后兼容。
+   */
+  isLive?(): boolean
 }
 
 /** 内核构造器（createPlayer 的 kernel 参数 / 平台能力选路的产物） */

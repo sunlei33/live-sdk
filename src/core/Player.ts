@@ -485,8 +485,10 @@ export class Player {
   /**
    * 定位到指定时间（秒），入参钳制到 `[0, duration]`。
    *
-   * **直播无限流（`duration === Infinity`）下为 noop** —— 直播时间轴受 live edge 约束，
-   * 任意定位只会持续累积延迟（README「Non-Goals」）；点播 / 重播回放为正常用法。
+   * **直播中为 noop** —— 直播时间轴受 live edge 约束，任意定位只会持续累积延迟
+   * （README「Non-Goals」）；点播 / 重播回放为正常用法。
+   * 「是否直播」问**内核**（`Kernel.isLive`），不从 `duration` 反推 ——
+   * MSE 路径下直播流的 `duration` 是有限的 playlist edge（见 `isLiveNow`）。
    */
   seek(time: number): void {
     this.emitCommand('seek', 'before')
@@ -494,12 +496,12 @@ export class Player {
       this.emitCommand('seek', 'after', false)
       return
     }
-    const duration = this.surface.duration
-    if (!Number.isFinite(duration)) {
-      logger.debug('[live-sdk] seek 在直播无限流上不生效（点播/重播态可用）')
+    if (this.isLiveNow()) {
+      logger.debug('[live-sdk] seek 在直播流上不生效（点播/重播态可用）')
       this.emitCommand('seek', 'after', false)
       return
     }
+    const duration = this.surface.duration
     const upper = duration > 0 ? duration : time
     const target = Math.min(Math.max(time, 0), upper)
     this.surface.seek(target)
@@ -1119,13 +1121,32 @@ export class Player {
   }
 
   /**
+   * 当前是否仍在直播（时间轴还在增长）。
+   *
+   * **优先问内核**（`Kernel.isLive?()`）。靠 `duration` 是否有限来判断是**不成立**的：
+   * 原生 HLS（`NativeKernel`）直播下确为 `Infinity`，但 MSE 路径下 hls.js 默认
+   * （`liveDurationInfinity: false`）会把直播流的 `MediaSource.duration` 写成 playlist edge
+   * —— **有限值**，且随滑窗递增，与点播在 `duration` 上无法区分。
+   * 内核未实现该扩展方法时回退到旧判据，保持向后兼容（见 `types.ts#Kernel.isLive`）。
+   */
+  private isLiveNow(): boolean {
+    const kernel = this.kernel
+    if (kernel?.isLive) return kernel.isLive()
+    return !Number.isFinite(this.surface.duration)
+  }
+
+  /**
    * 是否处于「近尾」：当前播放点之后已缓冲到媒体末尾，且距末尾在容差内。
-   * 直播无限流（duration=Infinity/NaN）恒为 false，避免把正常缓冲误判为播完。
+   * 直播中恒为 false，避免把正常缓冲误判为播完。
    * 容差取 max(0.5s, 最后区间长度的小比例)，兼顾正常结尾与异常流的时长偏差。
    */
   private isNearTail(tolerance = 0.5): boolean {
+    // 直播中不存在「播完」。这里必须走内核判据：MSE 路径下直播流的 `duration` 是有限的
+    // playlist edge，旧判据会漏进来 —— 低延迟直播里「延迟已压进容差 + buffer 到 edge」
+    // 就会被判成近尾，`onStall()` 据此停止重连并派发 `ENDED`（业务看到「直播已结束」）。
+    if (this.isLiveNow()) return false
     const duration = this.surface.duration
-    if (!Number.isFinite(duration) || duration <= 0) return false // 直播无限流
+    if (!Number.isFinite(duration) || duration <= 0) return false // 元数据未就绪
     const buffers = this.surface.buffered()
     if (buffers.length === 0) return false
     const bufferEnd = buffers[buffers.length - 1]![1]

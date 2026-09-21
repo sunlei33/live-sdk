@@ -729,9 +729,9 @@ check('destroy 后 root 已移除', true)
   })
   check('每个命令 before/after 成对', paired)
   check('applied 只出现在 after 阶段', seen.every((e) => (e.phase === 'before' ? e.applied === undefined : typeof e.applied === 'boolean')))
-  // 直播（无限流）下 seek 为 noop → 如实回报 applied=false
+  // 内核未实现 isLive（此处即默认替身）→ 回退到 duration 判据：非有限值即 noop
   const seekAfter = seen.filter((e) => e.name === 'seek' && e.phase === 'after').pop()
-  check('seek 在直播无限流下 applied=false', seekAfter && seekAfter.applied === false)
+  check('seek 在直播下 applied=false（内核未实现 isLive 的回退路径）', seekAfter && seekAfter.applied === false)
   pCmd.destroy()
 }
 
@@ -765,6 +765,51 @@ check('destroy 后 root 已移除', true)
   check('canPlay：MP4 与 HLS 分别判定，互不代表', pCap.canPlay('video/mp4') === false)
   check('canPlay：签名与用法（MIME 字符串入参、布尔返回）', typeof pCap.canPlay('video/mp4') === 'boolean')
   pCap.destroy()
+}
+
+// ══════════ 29：直播判据来自内核（Kernel.isLive） ══════════
+// 病灶：MSE 路径下 hls.js 默认 `liveDurationInfinity: false`，会把**直播流**的
+// MediaSource.duration 写成有限的 playlist edge（随滑窗递增）→「duration 是否有限」
+// 无法区分直播与点播，旧实现据此判定 seek 的 noop，会让直播中的 seek 真的落到媒体面。
+{
+  let live = true
+  class LiveAwareKernel {
+    static kernelName = 'LiveAwareKernel'
+    static isSupported() { return true }
+    constructor(opts) {
+      this.opts = opts
+      this.capabilities = { lowLatency: true, qualitySwitch: false, abr: false, stats: 'basic', nativeFallback: false }
+    }
+    load() { this.opts.onEvent('manifest_parsed', {}); return Promise.resolve() }
+    switchURL() { return Promise.resolve() }
+    switchQuality() {}
+    getStats() { return {} }
+    bufferInfo() { return { buffers: [], behind: 0, remaining: 0, length: 0 } }
+    recover() {}
+    destroy() {}
+    isLive() { return live }
+  }
+
+  const pLive = createPlayer({ container: '#playerLive', kernel: LiveAwareKernel })
+  const seenLive = []
+  pLive.on(sdk.Events.COMMAND, (e) => seenLive.push(e))
+  await pLive.play('https://cdn/liveAware.m3u8')
+  // 替身 <video> 在所有 player 之间共享（createElement 记忆化）→ 取基线，不假定为 0
+  const ctBefore = pLive.media.currentTime
+
+  // 模拟 MSE 直播：duration 是有限的 playlist edge
+  pLive.media.duration = 3600
+  pLive.media._fire('durationchange')
+  pLive.seek(30)
+  check('内核报 live 时，duration 有限也 noop（applied=false）', seenLive.at(-1)?.applied === false)
+  check('noop 时定位未落到媒体面', pLive.media.currentTime === ctBefore)
+
+  // 直播结束（playlist 出现 #EXT-X-ENDLIST）→ 内核翻转 → 时间轴转为可定位
+  live = false
+  pLive.seek(30)
+  check('内核翻转为非直播后可定位（applied=true）', seenLive.at(-1)?.applied === true)
+  check('翻转后定位落到媒体面', pLive.media.currentTime === 30)
+  pLive.destroy()
 }
 
 console.log(failures === 0 ? '\nSMOKE TEST OK' : `\n${failures} FAILURES`)

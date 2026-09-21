@@ -229,7 +229,7 @@ player.on('features_updated', (report) => {
 | `switchQuality(id)` | `Promise<void>` | 切清晰度（`Quality.id`；`-1` 恢复自动 ABR）。返回 Promise 是因为内部会 `await` 钩子；语句式调用无需 `await` |
 | `switchURL(url)` | `Promise<void>` | 运行中切流（保留会话状态） |
 | `requestFullscreen(target?)` / `exitFullscreen()` | `void` | 进入 / 退出全屏（iOS 原生视频全屏亦可退出）。**传 `target` 可指定全屏元素**：缺省全屏 `<video>`；传容器（如 `player.root`）做容器级全屏，自绘控件在全屏内仍可见可点 |
-| `seek(time)` | `void` | 定位（秒），自动钳制到 `[0, duration]`。**直播无限流下为 noop**；点播/重播正常生效 |
+| `seek(time)` | `void` | 定位（秒），自动钳制到 `[0, duration]`。**直播下为 noop**（判据由内核 `isLive` 给出，不从 `duration` 反推）；点播/重播正常生效 |
 | `setPlaybackRate(rate)` | `void` | 设置倍速，写后读回。**直播主场景不建议**（变速会持续累积/消耗延迟）；点播/重播为正常用法 |
 | `setPoster(poster?)` | `void` | 运行时更换封面（空值 = 移除）；呈现方式仍由 `posterMode` 决定 |
 | `setLiveLatency(target?, max?)` | `void` | 运行时覆盖 LL-HLS 目标延迟；**传空 = 清除覆盖**、恢复 `network` 配置的动态策略 |
@@ -374,7 +374,7 @@ player.on('command', ({ name, phase, applied, time }) => {
 
 | 命令 | no-op 条件 |
 |---|---|
-| `seek` | 直播无限流（`duration === Infinity`）下不生效；实例已销毁 |
+| `seek` | 直播中不生效（内核 `isLive === true`）；实例已销毁 |
 | `switchQuality` | 内核无 `qualitySwitch` 能力；`id` 不在档位表；被 before 钩子拦截 |
 | `switchURL` | 内核未初始化；切流失败；被 before 钩子拦截 |
 | `setLiveLatency` | 内核未实现 `setLiveLatency`（如 `NativeKernel`） |
@@ -552,13 +552,13 @@ player.registerPlugin(SentryReporter, { sentry: Sentry })
 
 ### 类型一：不做 VOD（时间轴可控的点播场景）
 
-> 根源：live-sdk 是**直播内核**——直播的时间轴受 live edge 约束、不可随意摆布，因此「面向时间轴的相对操作」在**直播态**下不具备语义。`seek` / `setPlaybackRate` 已进入命令集（服务点播 / 重播回放），但在直播无限流下分别表现为 **noop** 与**不建议使用** —— 命令的存在不代表语义边界消失。
+> 根源：live-sdk 是**直播内核**——直播的时间轴受 live edge 约束、不可随意摆布，因此「面向时间轴的相对操作」在**直播态**下不具备语义。`seek` / `setPlaybackRate` 已进入命令集（服务点播 / 重播回放），但在直播中分别表现为 **noop** 与**不建议使用** —— 命令的存在不代表语义边界消失。
 
 | 边界项 | 说明 | 现状 |
 |---|---|---|
 | **渐进式点播文件**（普通 `.mp4` 直连播放） | 选型 hls.js 单引擎，不做 range 请求/分片加载；「完整 MP4 文件」与选定 fMP4 流式容器是两回事 | 仍不支持：挂 VOD 内核 / `DashKernel`，或改用 mpegts.js |
 | **倍速播放（`setPlaybackRate`）** | 直播是无限线性流，变速只会破坏「边缘跟随 / 低延迟」语义——调慢持续累积延迟，调快在缓冲耗尽时反复等待 | 命令已提供；**直播主场景不建议使用**，点播 / 重播回放为正常用法 |
-| **定位 / 跳转（`seek`）** | 直播无「跳到某处」语义 | 命令已提供，但**直播无限流（`duration === Infinity`）下为 noop**；点播 / 重播（有限时长）正常生效 |
+| **定位 / 跳转（`seek`）** | 直播无「跳到某处」语义 | 命令已提供，但**直播中为 noop**（判据由内核 `isLive` 给出——**不要用 `duration` 反推**：MSE 路径下 hls.js 会把直播流的 `duration` 写成有限的 playlist edge）；点播 / 重播正常生效 |
 
 > **注意**：HLS 点播流（`#EXT-X-ENDLIST`）**是支持的**（走同一内核）；「不做 VOD」特指上表这些**面向时间轴的操作**与**渐进式 `.mp4` 文件**。详见技术规格 §1.3。
 
@@ -901,7 +901,7 @@ player.on('features_updated', (report) => {
 | `switchQuality(id)` | `Promise<void>` | Switch quality (`Quality.id`; `-1` restores auto ABR). Returns a Promise because it awaits hooks; statement-style calls need no `await` |
 | `switchURL(url)` | `Promise<void>` | Switch stream at runtime (session state preserved) |
 | `requestFullscreen(target?)` / `exitFullscreen()` | `void` | Enter / exit fullscreen (iOS native video fullscreen can also be exited). **Pass `target` to choose the element**: defaults to `<video>`; pass a container (e.g. `player.root`) for container-level fullscreen so custom controls stay visible and clickable |
-| `seek(time)` | `void` | Seek (seconds), auto-clamped to `[0, duration]`. **No-op on an infinite live stream**; works for VOD / replay |
+| `seek(time)` | `void` | Seek (seconds), auto-clamped to `[0, duration]`. **No-op while live** (decided by the kernel's `isLive`, not inferred from `duration`); works for VOD / replay |
 | `setPlaybackRate(rate)` | `void` | Set playback rate, read back afterwards. **Not recommended for the primary live scenario** (rate changes accumulate/consume latency); fine for VOD / replay |
 | `setPoster(poster?)` | `void` | Swap the poster at runtime (empty = remove); rendering still follows `posterMode` |
 | `setLiveLatency(target?, max?)` | `void` | Override the LL-HLS target latency at runtime; **passing nothing clears the override** and restores the dynamic policy from `network` |
@@ -1042,7 +1042,7 @@ Typical `applied === false` cases (**"the command returned but had no effect", n
 
 | Command | No-op condition |
 |---|---|
-| `seek` | on an infinite live stream (`duration === Infinity`); destroyed instance |
+| `seek` | while live (kernel `isLive === true`); destroyed instance |
 | `switchQuality` | kernel lacks `qualitySwitch`; `id` not in the quality table; intercepted by a before hook |
 | `switchURL` | kernel not initialised; switch failed; intercepted by a before hook |
 | `setLiveLatency` | kernel doesn't implement `setLiveLatency` (e.g. `NativeKernel`) |
@@ -1224,13 +1224,13 @@ Grouped by **root cause** into four categories; each category shares a single de
 
 ### Category 1: No VOD (controllable-timeline playback)
 
-> Root cause: live-sdk is a **live-streaming kernel** — a live timeline is constrained by the live edge and cannot be freely positioned, so "operations relative to the timeline" carry no meaning **in the live state**. `seek` / `setPlaybackRate` have entered the command set (to serve VOD / replay playback), but on an infinite live stream they are a **no-op** and **not recommended** respectively — a command existing does not erase the semantic boundary.
+> Root cause: live-sdk is a **live-streaming kernel** — a live timeline is constrained by the live edge and cannot be freely positioned, so "operations relative to the timeline" carry no meaning **in the live state**. `seek` / `setPlaybackRate` have entered the command set (to serve VOD / replay playback), but while live they are a **no-op** and **not recommended** respectively — a command existing does not erase the semantic boundary.
 
 | Boundary item | Notes | Status |
 |---|---|---|
 | **Progressive VOD files** (plain `.mp4` direct playback) | A single-engine hls.js choice that does not do range requests / segment loading; "a complete MP4 file" and the chosen fMP4 streaming container are two different things | Still unsupported: attach a VOD kernel / `DashKernel`, or switch to mpegts.js |
 | **Playback rate (`setPlaybackRate`)** | Live is an infinite linear stream; changing rate only breaks the "edge following / low latency" semantics — slowing down accumulates latency, speeding up repeatedly stalls when the buffer runs dry | Command provided; **not recommended for the primary live scenario**, fine for VOD / replay |
-| **Positioning / seeking (`seek`)** | Live has no "jump to a position" semantics | Command provided, but a **no-op on an infinite live stream (`duration === Infinity`)**; works for VOD / replay (finite duration) |
+| **Positioning / seeking (`seek`)** | Live has no "jump to a position" semantics | Command provided, but a **no-op while live** (decided by the kernel's `isLive` — **do not infer it from `duration`**: over MSE, hls.js writes a live stream's `duration` as the finite playlist edge); works for VOD / replay |
 
 > **Note**: HLS VOD streams (`#EXT-X-ENDLIST`) **are supported** (through the same kernel); "no VOD" here specifically means the **timeline-relative operations** above and **progressive `.mp4` files**. See the technical specification §1.3.
 

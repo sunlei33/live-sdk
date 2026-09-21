@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { installDom, makeEl, type FakeMediaElement } from './fixtures/dom'
+import { installDom, makeEl, makeTimeRanges, type FakeMediaElement } from './fixtures/dom'
 import { ERROR_CODE, COMMAND_NAMES, ERROR_DOMAIN } from '../src/constants'
 
 type Dom = ReturnType<typeof installDom>
@@ -14,9 +14,15 @@ let createWebPlatform: typeof import('../src/platform/web').createWebPlatform
 /**
  * 最小内核替身：load() 即视为 manifest 就绪，用于驱动 attemptPlay 分支。
  * 避免依赖真实 HLS 流；原生回退/断流等分支由 e2e 的 MockKernel 覆盖。
+ *
+ * @param getLive 传入即挂载 `Kernel.isLive?()`（每次读取时求值，便于用例中途翻转）。
+ *   **不传 = 根本不实现该扩展方法** —— 用于覆盖「回退到 `duration` 判据」的路径
+ *   （对应 `NativeKernel` 与自定义内核）。
  */
-function makeMockKernel() {
+function makeMockKernel(getLive?: () => boolean) {
   return class MockKernel {
+    // 声明而不初始化：不传 getLive 时该属性不存在于实例上（真正模拟「未实现」）
+    declare isLive?: () => boolean
     static readonly kernelName = 'MockKernel'
     static isSupported(): boolean {
       return true
@@ -31,6 +37,7 @@ function makeMockKernel() {
     private onEvent: (e: string, d?: unknown) => void
     constructor(opts: { onEvent: (e: string, d?: unknown) => void }) {
       this.onEvent = opts.onEvent
+      if (getLive) this.isLive = getLive
     }
     async load(): Promise<void> {
       this.onEvent('manifest_parsed', {})
@@ -69,13 +76,16 @@ afterEach(() => {
   dom.reset()
 })
 
-function createPlayer(config: Record<string, unknown> = {}): PlayerInstance {
+function createPlayer(
+  config: Record<string, unknown> = {},
+  kernelFactory: () => unknown = makeMockKernel,
+): PlayerInstance {
   // P0 之后 Player 需要「平台装配包」第二参 —— 测试用真实的 Web 平台实现（跑在 DOM 替身上）
-  const platform = createWebPlatform({ kernel: makeMockKernel() as never })
+  const platform = createWebPlatform({ kernel: kernelFactory() as never })
   return new PlayerCtor(
     {
       container: '#c',
-      kernel: makeMockKernel() as never,
+      kernel: kernelFactory() as never,
       ...config,
     } as never,
     platform as never,
@@ -650,12 +660,12 @@ describe('COMMAND 事件（统一命令观测）', () => {
     p.destroy()
   })
 
-  it('applied 反映真实语义：seek 在直播无限流下 false、有限时长下 true', async () => {
-    const p = createPlayer()
+  it('applied 反映真实语义：seek 在直播下 false、点播下 true（**内核未实现 isLive 的回退路径**）', async () => {
+    const p = createPlayer() // 默认替身不实现 isLive → 判据回退到 `duration`（= NativeKernel 路径）
     const seen: Seen[] = []
     p.on('command', (e) => seen.push(e as Seen))
 
-    // 直播（无限流）→ noop
+    // 直播（原生 HLS：duration 为 Infinity）→ noop
     video.duration = Infinity
     video._fire('durationchange')
     p.seek(30)
@@ -667,6 +677,53 @@ describe('COMMAND 事件（统一命令观测）', () => {
     p.seek(30)
     expect(seen.at(-1)).toMatchObject({ name: 'seek', phase: 'after', applied: true })
     expect(video.currentTime).toBe(30)
+    p.destroy()
+  })
+
+  it('【回归】直播判据来自内核：duration 有限（MSE 路径）也照旧 noop，翻转后自动可用', async () => {
+    let live = true
+    const LiveKernel = makeMockKernel(() => live) // 替身挂上 isLive，值可中途翻转
+    const p = createPlayer({}, () => LiveKernel)
+    await p.play({ url: 'https://cdn/live.m3u8' }) // 起播 → 内核实例就绪，判据才会问内核
+    const seen: Seen[] = []
+    p.on('command', (e) => seen.push(e as Seen))
+
+    // 模拟 MSE 路径下的直播：hls.js 默认 `liveDurationInfinity: false`，
+    // 会把 MediaSource.duration 写成 playlist edge —— **有限值**、随滑窗递增。
+    // 旧判据（`!Number.isFinite(duration)`）在这里漏判 → seek 会真的落到媒体面。
+    video.duration = 3600
+    video._fire('durationchange')
+
+    p.seek(30)
+    expect(seen.at(-1)).toMatchObject({ name: 'seek', phase: 'after', applied: false })
+    expect(video.currentTime).toBe(0) // 未落到媒体面
+
+    // 直播结束（playlist 出现 #EXT-X-ENDLIST）→ 内核翻转 → 时间轴转为可定位
+    live = false
+    p.seek(30)
+    expect(seen.at(-1)).toMatchObject({ name: 'seek', phase: 'after', applied: true })
+    expect(video.currentTime).toBe(30)
+    p.destroy()
+  })
+
+  it('【回归】低延迟直播贴到 playlist edge 卡顿 → 不得误判 ended（旧判据会误报「直播已结束」）', async () => {
+    const p = createPlayer({}, () => makeMockKernel(() => true))
+    await p.play({ url: 'https://cdn/live.m3u8' })
+    video._fire('playing')
+
+    const ended: unknown[] = []
+    p.on('ended', (e) => ended.push(e))
+
+    // duration = playlist edge（有限）；已缓冲到 edge、播放点也贴着 edge
+    // —— LL-HLS 目标延迟低于 1s 容差时即可达：旧判据判「近尾」→ `onStall()` 直接 transition('ended')
+    video.duration = 3600
+    video.currentTime = 3600
+    video.buffered = makeTimeRanges([[3500, 3600]])
+    video._fire('durationchange')
+    video._fire('waiting')
+
+    expect(ended).toHaveLength(0)
+    expect(p.getState().sessionState).toBe('stalled') // 按卡顿处理（会走重连），而非 ended
     p.destroy()
   })
 

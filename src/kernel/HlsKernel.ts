@@ -21,6 +21,15 @@ export class HlsKernel implements Kernel {
   // 下载速率统计（FRAG_LOADED 累计，简单滑动平均）
   private speedAccum = 0
   private speedCount = 0
+  /**
+   * 当前 level 的 playlist 是否仍在直播（无 `#EXT-X-ENDLIST`）。
+   *
+   * 初值取 `true`，与 hls.js `LevelDetails.live` 的默认值一致（`loader/level-details.ts:24`）。
+   * **换源时刻意不重置**：新源解析出 `live` 前保持旧值，避免「VOD → VOD」换源时产生
+   * 一次无意义的 `true → false` 抖动；代价是从「点播源换到直播源」时会有一个很短的窗口
+   * 仍报非直播（此时 `duration` 也还是旧值，属同一瞬态）。
+   */
+  private liveFlag = true
 
   constructor(opts: KernelOptions) {
     this.opts = opts
@@ -113,6 +122,17 @@ export class HlsKernel implements Kernel {
     hls.config.liveMaxLatencyDuration = max
   }
 
+  /**
+   * playlist 是否仍在直播 —— 见 `Kernel.isLive?()`。
+   *
+   * core 用它替代「`duration` 是否有限」的推断：hls.js 默认 `liveDurationInfinity: false`
+   * 会把**直播流**的 `MediaSource.duration` 写成有限的 playlist edge，
+   * 于是直播与点播在 `duration` 上无法区分。
+   */
+  isLive(): boolean {
+    return this.liveFlag
+  }
+
   destroy(): void {
     // 关键：hls.destroy() 会 detachMedia → revoke 内部 object URL → 关闭 MediaSource。
     // 但若 attachMedia 尚未走到 sourceopen（如刚 loadSource 就被 destroy），
@@ -177,6 +197,18 @@ export class HlsKernel implements Kernel {
     })
     hls.on(Hls.Events.LEVELS_UPDATED, () => {
       this.opts.onEvent('levels_updated', this.getLevels())
+    })
+    // `details.live` = playlist 里还没有 `#EXT-X-ENDLIST`，是 hls.js 自己的权威判据
+    // （它据此决定把 MediaSource.duration 写成 Infinity 还是 playlist edge）。
+    // 注意监听的是 **LEVEL_UPDATED（单数）**，payload `{ details, level, drift }`；
+    // 隔壁 LEVELS_UPDATED（复数）只带 `{ levels }`，拿不到 details。
+    hls.on(Hls.Events.LEVEL_UPDATED, (_evt, data) => {
+      const live = data.details.live
+      // 直播期间该事件随 playlist 重载**周期性触发**（数秒一次）→ 必须去重，
+      // 只在真正翻转时派发（与 `live_status` 同一取向：不变化不通知）。
+      if (live === this.liveFlag) return
+      this.liveFlag = live
+      this.opts.onEvent('live_changed', { live })
     })
     hls.on(Hls.Events.LEVEL_SWITCHED, (_evt, data) => {
       this.opts.onEvent('level_switched', { level: data.level })

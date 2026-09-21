@@ -120,8 +120,8 @@
 | **播放内核** | **hls.js**（npm 锁版本，业界成熟库） | **自研**（hls/flv/dash 三套内核 + 共享 `streaming-shared`） | 两条路线：借力成熟库 vs 自研可控。自研换来 LL-HLS 精细调优能力，也带来大量内核级 issue |
 | **UI 架构** | **Headless**：内核不创建可见 DOM，只暴露「状态/命令/事件」三契约 | **UI 内建**：`Player extends MediaProxy`，控件以插件形式挂在播放器实体上 | live-sdk 更适合自绘/多端复用；xgplayer UI 开箱即用但难剥离 |
 | **状态模型** | **显式状态机**：`idle→loading→ready→playing→paused→stalled→error→ended`，表驱动 | **状态常量 + class 名**：`INITIAL/READY/ATTACHING/ATTACHED/NOTALLOW/RUNNING/ENDED/DESTROYED`，靠 `addClass/removeClass` 驱动 | live-sdk 的状态可枚举、可断言；xgplayer 的状态与 DOM class 耦合 |
-| **点播支持** | ⚠️ **仅 HLS 有限时长流**（重播 / 点播回放，`duration` 为有限值）；**不支持**渐进式 `.mp4`、`playNext`、播放列表编排 | ✅ 一等公民（`isLive=false`、`seek`、`replay`、`playNext`、渐进式 MP4） | **用户明确举例的技术选型差异**，详见 §1.2 |
-| **时间轴操作** | ⚠️ `seek` / `setPlaybackRate` **在契约内，但受限于有限时长**（0.3.0 起）：直播无限流下 `seek` 为 **noop**、倍速**不建议使用** | ✅ 一等公民（`seek` + 倍速面板）；直播下另有「动态倍速纠偏」对齐延迟 | 判据是 **`duration` 是否有限**，而非「有没有这条命令」。xgplayer 的直播倍速是**内部纠偏手段**（微调追平 live edge），不是给用户的操作；live-sdk 的纠偏交给 hls.js 的 `targetLatency` |
+| **点播支持** | ⚠️ **仅 HLS 有限时长流**（重播 / 点播回放，内核报 `isLive=false`）；**不支持**渐进式 `.mp4`、`playNext`、播放列表编排 | ✅ 一等公民（`isLive=false`、`seek`、`replay`、`playNext`、渐进式 MP4） | **用户明确举例的技术选型差异**，详见 §1.2 |
+| **时间轴操作** | ⚠️ `seek` / `setPlaybackRate` **在契约内，但受限于有限时长**（0.3.0 起）：直播下 `seek` 为 **noop**、倍速**不建议使用** | ✅ 一等公民（`seek` + 倍速面板）；直播下另有「动态倍速纠偏」对齐延迟 | 判据是**内核报的 `isLive`**（0.6.0 起），而非「有没有这条命令」，也**不是** `duration` 是否有限（MSE 直播流的 `duration` 是有限的 playlist edge，见 §1.2）。xgplayer 的直播倍速是**内部纠偏手段**（微调追平 live edge），不是给用户的操作；live-sdk 的纠偏交给 hls.js 的 `targetLatency` |
 | **DRM** | ❌ 划出边界（`client='absent'`） | ⚠️ `ErrorTypes.drm` 预留，另有 `xgplayer-shaka` 包承接 | 两者都非强项，但 xgplayer 有扩展位 |
 | **低延迟** | LL-HLS（fMP4）+ `targetLatency`/`maxLatency` 透传 hls.js | 自研 LL-HLS（`useLowLatency`、`targetLatency`、`mseLowLatency`、`preferMMS`）+ gap jump + 动态倍速纠偏 | xgplayer 更细（自研可控）；live-sdk 依赖 hls.js 实现 |
 | **端回退** | `NativeKernel`（Safari 原生 HLS） | MSE→native 自动降级、MMS（iOS ManagedMediaSource）、AirPlay/Cast（`xgplayer-cast`） | xgplayer 端适配深度远超 live-sdk |
@@ -141,19 +141,21 @@
 | **xgplayer 反证** | xgplayer 的 `xgplayer-mp4` / `xgplayer-mp4-new` / `xgplayer-mp4-loader`（合计 ~3600 行）专为渐进式 MP4，且**恰是 issue 重灾区**（#1910/#1911/#1872/#1830：大文件 OOM、引入后无法播放、拖拽报错）——说明 VOD 不是「顺手支持」的，是实打实的复杂度成本 |
 
 > **建议（已采纳）**：spec 现在给出的是「**技术选型的显式代价**」口径，而非「暂不做」——
-> 判据写成「**时间轴此刻可不可控**」，由 `PlayerState.duration` 是否有限来判定（见 spec §3.7）。
+> 判据写成「**时间轴此刻可不可控**」，由**内核**回答（`Kernel.isLive`，0.6.0 起；见 spec §3.2）。
 
 > **边界澄清（0.3.0 起）**：live-sdk 把 `currentTime` / `duration` 放进状态快照，并提供
 > `seek` / `setPlaybackRate` 两条命令，但**语义被约束在「有限时长」**：
 >
-> | | 直播（`duration === Infinity`） | 点播 / 重播（`duration` 有限） |
+> | | 直播（内核 `isLive=true`） | 点播 / 重播（内核 `isLive=false`） |
 > |---|---|---|
 > | `seek(t)` | **noop**（调用不生效、不抛错） | 正常定位 |
 > | `setPlaybackRate(r)` | 不拦截，但**不建议使用**（变速持续累积/消耗延迟） | 正常用法 |
 > | `requestFullscreen` / 其余命令 | 同样适用 | 同样适用 |
 >
-> 因此**不要因为「有 currentTime 了」就以为可以画可拖拽进度条**：直播时间轴受 live edge 约束，
-> 拖拽无意义（`seek` 会被判定为 no-op，`COMMAND` 事件的 `applied` 会如实回报 `false`）。
+> 因此**不要因为「有 `currentTime` / `duration` 了」就以为可以画可拖拽进度条**：直播时间轴受
+> live edge 约束，拖拽无意义（`seek` 会被判定为 no-op，`COMMAND` 事件的 `applied` 会如实回报 `false`）。
+> ⚠️ 尤其**不要用 `duration` 是否有限来判定「能不能拖」** —— MSE 路径下 hls.js 会把直播流的
+> `duration` 写成有限的 playlist edge（`liveDurationInfinity` 默认 `false`），据此判定会误判。
 > 渐进式 `.mp4`（真正的 VOD）仍是 Non-Goal。
 
 ### 1.3 选型差异导致的 issue 类型对照
