@@ -823,20 +823,26 @@
   1. 用 `HlsKernel` 播**直播流**（playlist 无 `#EXT-X-ENDLIST`）→ 调 `seek()`。
   2. 同一路流**直播结束**（playlist 出现 `#EXT-X-ENDLIST`）→ 再调 `seek()`。
   3. 低延迟直播中把延迟压进 1s 内并触发一次 `waiting`（卡顿）。
-  4. 自定义平台：`Kernel` 实现里**不提供** `isLive?()`。
+  4. 直播中让流停止更新（断播），使播放点追到 playlist edge → 浏览器派发原生 `ended`。
+  5. 自定义平台：`Kernel` 实现里**不提供** `isLive?()`。
 - **预期**：
   1. 直播中 `seek()` → `applied === false` **且不落到媒体面**（即使 `duration` 是有限值 —— 这是本条的核心回归点）。
   2. 直播结束后（内核翻转）→ `seek()` 正常生效、`applied === true`，**无需换 URL 或重建播放器**。
   3. 低延迟直播贴到 playlist edge 卡顿 → 走 `stalled` + 重连，**不派发 `end`**
      （历史缺陷：会被误判为「直播已结束」并停止重连；业务侧看到的是 ENDED 事件）。
-  4. 自定义平台未实现 `isLive?()` → 回退到 `!Number.isFinite(duration)`，行为与旧版本一致
+  4. 直播中浏览器派发**原生 `ended`**（流停止更新、播放点追到 playlist edge）→ **不派发 `ENDED`**，
+     改走断流恢复（派发 `retry` → 重连），`playing` 保持 `true`。
+     判据：媒体 `ended` 只说明「追上了（可能已冻结的）末尾」，且此后媒体**不会自行恢复**；
+     这与「内容播完」是两件事（历史缺陷：同样会被宣告为「直播已结束」并停掉重连）。
+     等到内核翻转 `isLive=false` 后再来的原生 `ended` 才照常派发 `ENDED`。
+  5. 自定义平台未实现 `isLive?()` → 回退到 `!Number.isFinite(duration)`，行为与旧版本一致
      （原生 HLS 直播恰好适用，因为它的 `duration` 确为 `Infinity`）。
-  5. 内核翻转时透出 `kernel_event`（`type === 'live_changed'`，载荷 `{ live }`），
+  6. 内核翻转时透出 `kernel_event`（`type === 'live_changed'`，载荷 `{ live }`），
      接入方可据此切换 UI（如「直播已结束，可回看」）。
-  6. 该状态**不进 `KernelCapabilities`**：能力位是**静态**的（构造时确定，用于隐藏/降级入口），
+  7. 该状态**不进 `KernelCapabilities`**：能力位是**静态**的（构造时确定，用于隐藏/降级入口），
      而「是否直播」是**会翻转的动态状态** —— 放进去会诱导接入方初始化时读一次并长期缓存。
-- **验收方式**：单测（`test/player.test.ts`：内核报 live / 翻转 / 未实现时的回退三类）+ 冒烟（`verify/smoke.mjs`
-  第 29 组：`duration` 有限但内核报 live 时 noop）。⚠️ **真实内核下的 `duration` 取值未在 CI 自动化**
+- **验收方式**：单测（`test/player.test.ts`：内核报 live / 翻转 / 未实现时的回退 / 原生 `ended` 的两种语义）+ 冒烟（`verify/smoke.mjs`
+  第 29 组：`duration` 有限但内核报 live 时 noop、直播中原生 `ended` 不派发 `ENDED`）。⚠️ **真实内核下的 `duration` 取值未在 CI 自动化**
   （E2E 注入 MockKernel，不实例化 `HlsKernel`），需要真机 + 真实 HLS 直播流人工核对一次。
 
 ---

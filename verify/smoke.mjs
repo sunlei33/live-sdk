@@ -804,6 +804,17 @@ check('destroy 后 root 已移除', true)
   check('内核报 live 时，duration 有限也 noop（applied=false）', seenLive.at(-1)?.applied === false)
   check('noop 时定位未落到媒体面', pLive.media.currentTime === ctBefore)
 
+  // 直播中原生 ended ≠「直播结束」：MSE 下 duration 是 playlist edge，流停止更新时
+  // 播放点会追到它 → 浏览器派发 ended（且此后不会自行恢复）→ 应按断流恢复处理
+  const endedEvents = []
+  const retryEvents = []
+  pLive.on(sdk.Events.ENDED, (e) => endedEvents.push(e))
+  pLive.on(sdk.Events.RETRY, (e) => retryEvents.push(e))
+  pLive.media.currentTime = 3600
+  pLive.media._fire('ended')
+  check('直播中原生 ended 不派发 ENDED', endedEvents.length === 0)
+  check('直播中原生 ended 改走断流恢复（派发 retry）', retryEvents.length === 1)
+
   // 直播结束（playlist 出现 #EXT-X-ENDLIST）→ 内核翻转 → 时间轴转为可定位
   live = false
   pLive.seek(30)

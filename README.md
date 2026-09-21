@@ -351,6 +351,12 @@ RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
 VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT  COMMAND
 ```
 
+> ⚠️ **直播中的 `ended` 不等于「直播结束」**（0.6.0 起修正）：MSE 路径下内核把 `duration` 写成
+> playlist edge，流停止更新时播放点会追到它、浏览器随即派发原生 `ended`。此时 SDK 按**断流恢复**
+> 处理（派发 `retry` + 重连），**不派发 `ENDED`**；只有内核已确认直播结束（playlist 出现
+> `#EXT-X-ENDLIST`）之后到来的 `ended` 才会照常派发。业务若要展示「直播已结束」，
+> 应依据 `live_status`（业务接口）或 `kernel_event` 的 `live_changed`，**不要**用 `ENDED`。
+
 插件还会派发两个**独立事件名**（刻意不进 `Events` 枚举 —— 它们属于 `preset: 'live'` 的可选旁路能力，不是播放内核契约的一部分；不接对应配置的接入方永远收不到）：
 
 ```ts
@@ -1019,6 +1025,8 @@ LOAD_START  MANIFEST_PARSED  FIRST_FRAME  PLAY  PAUSE  PLAYING  STALLED  RECOVER
 RETRY  ERROR  ENDED  QUALITY_CHANGE  ABR_CHANGE  BUFFER_UPDATE  SPEED_UPDATE
 VISIBILITY_CHANGE  FEATURES_UPDATED  KERNEL_EVENT  COMMAND
 ```
+
+> ⚠️ **`ended` while live does not mean "the live stream has ended"** (fixed in 0.6.0): over MSE the kernel writes `duration` as the playlist edge, so once the stream stops being refreshed the playhead catches up to it and the browser fires a native `ended`. In that case the SDK treats it as a **stream-interruption recovery** (emits `retry` and reconnects) and **does not emit `ENDED`**; only an `ended` arriving after the kernel has confirmed the stream ended (playlist contains `#EXT-X-ENDLIST`) is propagated. To show "the live stream has ended", rely on `live_status` (your own API) or the `live_changed` `kernel_event` — **not** on `ENDED`.
 
 Plugins additionally dispatch two **standalone event names** (deliberately kept out of the `Events` enum — they belong to the optional side-channel provided by `preset: 'live'`, not to the playback kernel contract; integrations that never configure them will never receive them):
 

@@ -987,8 +987,23 @@ export class Player {
    *
    * `playIntent = false` 是关键：**播完 = 用户意图终止**，重连逻辑不得把它复活
    * （否则近尾结束会被当成断流，触发无意义的重连）。
+   *
+   * **直播例外 —— 原生 `ended` 不等于「直播结束」**：MSE 路径下内核把 `duration` 写成
+   * playlist edge（见 `isLiveNow`），流一旦停止更新（断播 / 严重落后），播放点会线性追到
+   * 该值，浏览器随即派发原生 `ended` —— 且此后**不会自行恢复**（ended 后媒体保持暂停，
+   * 须显式 `play()` 或重载）。
+   * 所以直播中不能按「播完」处理（会让业务显示结束态、并停掉重连），也不宜按普通卡顿
+   * 等待自愈（`loadTimeout` 默认 8–20s，而 `ended` 是确定性信号，不是「数据还在路上」）
+   * —— 直接走断流恢复。
+   * 判据同样走 `isLiveNow()`：直播结束（playlist 出现 `#EXT-X-ENDLIST`）后内核会翻转，
+   * 那时缓冲播完的原生 `ended` 才是真的结束，照常派发 `ENDED`。
    */
   private onMediaEnded(): void {
+    if (this.isLiveNow()) {
+      logger.debug('[live-sdk] 直播中收到原生 ended（播放点追至流末尾）→ 按断流恢复')
+      this.recover(ERROR_CODE.NETWORK_ERROR, '直播流停止更新（播放点追至末尾）')
+      return
+    }
     this.playIntent = false
     this.mediaPaused = true
     this.stateMachine.transition('ended')

@@ -727,6 +727,73 @@ describe('COMMAND 事件（统一命令观测）', () => {
     p.destroy()
   })
 
+  it('【回归】直播中原生 ended 不等于「直播结束」→ 不派发 ENDED，改走断流恢复', async () => {
+    vi.useFakeTimers()
+    const p = createPlayer(
+      { network: { retryCount: 3, retryDelay: 1, loadTimeout: 50 } },
+      () => makeMockKernel(() => true),
+    )
+    await p.play({ url: 'https://cdn/live.m3u8' })
+    video._fire('playing')
+
+    const ended: unknown[] = []
+    const retried: unknown[] = []
+    p.on('ended', (e) => ended.push(e))
+    p.on('retry', (e) => retried.push(e))
+
+    // MSE 直播：duration = playlist edge（有限）。流停止更新 → 播放点追到该值 → 原生 ended
+    // （且此后不会自行恢复），旧实现会据此宣告「直播已结束」并停掉重连。
+    video.duration = 3600
+    video.currentTime = 3600
+    video._fire('durationchange')
+    video._fire('ended')
+
+    expect(ended).toHaveLength(0) // 不宣告「直播已结束」
+    expect(retried).toHaveLength(1) // 而是进入断流恢复
+    expect(p.getState().playing).toBe(true) // 按钮保持「播放中」
+    p.destroy()
+  })
+
+  it('内核翻转为非直播后，原生 ended 才是真的结束', async () => {
+    let live = true
+    const LiveKernel = makeMockKernel(() => live)
+    const p = createPlayer({}, () => LiveKernel)
+    await p.play({ url: 'https://cdn/live.m3u8' })
+    video._fire('playing')
+
+    video.duration = 3600
+    video.currentTime = 3600
+    video._fire('durationchange')
+
+    live = false // playlist 出现了 #EXT-X-ENDLIST → 内核翻转
+    const ended: unknown[] = []
+    p.on('ended', (e) => ended.push(e))
+    video._fire('ended')
+
+    expect(ended).toHaveLength(1)
+    expect(p.getState().sessionState).toBe('ended')
+    expect(p.getState().playing).toBe(false)
+    p.destroy()
+  })
+
+  it('非直播（内核未实现 isLive 的回退路径）中原生 ended 照常宣告结束', async () => {
+    const p = createPlayer()
+    await p.play({ url: 'https://cdn/vod.m3u8' })
+    video._fire('playing')
+
+    const ended: unknown[] = []
+    p.on('ended', (e) => ended.push(e))
+
+    video.duration = 120
+    video.currentTime = 120
+    video._fire('durationchange')
+    video._fire('ended')
+
+    expect(ended).toHaveLength(1)
+    expect(p.getState().sessionState).toBe('ended')
+    p.destroy()
+  })
+
   it('applied：switchQuality 传入档位表里没有的 id → false', async () => {
     const p = createPlayer()
     const seen: Seen[] = []
