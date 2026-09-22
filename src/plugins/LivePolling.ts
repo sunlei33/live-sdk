@@ -1,5 +1,6 @@
 import { BasePlugin } from '../core/BasePlugin'
 import { logger } from '../utils/logger'
+import { bi } from '../utils/i18n'
 import type { LiveStatusErrorPayload, LiveStatusPayload } from '../types'
 
 /** 直播流状态（服务端下发，映射为事件派发） */
@@ -119,7 +120,7 @@ export class LivePolling extends BasePlugin {
         const status = normalizeStatus(raw)
         outcome = status
           ? { ok: true, status, raw }
-          : { ok: false, error: '响应缺少可识别的状态字段（status / liveStatus / state）' }
+          : { ok: false, error: bi('响应缺少可识别的状态字段（status / liveStatus / state）', 'response has no recognizable status field (status / liveStatus / state)') }
       }
     } catch (err) {
       outcome = { ok: false, error: (err as Error)?.message || String(err) }
@@ -172,7 +173,7 @@ export class LivePolling extends BasePlugin {
   /** 记录一次失败：日志全量输出，事件按节流输出。 */
   private reportFailure(error: string): void {
     this.failCount++
-    logger.warn(`[live-sdk] 直播状态轮询失败（连续 ${this.failCount} 次，${error}）：${this.url}`)
+    logger.warn(`[live-sdk] ${bi(`直播状态轮询失败（连续 ${this.failCount} 次，${error}）：${this.url}`, `live status polling failed (${this.failCount} consecutive, ${error}): ${this.url}`)}`)
     if (!LivePolling.shouldReportFailure(this.failCount)) return
     const payload: LiveStatusErrorPayload = {
       url: this.url,

@@ -1,6 +1,7 @@
 import type { FeatureKey, LevelInfo, Quality, SideState } from '../types'
 import { buildQualityTable } from '../utils/quality'
 import { logger } from '../utils/logger'
+import { bi } from '../utils/i18n'
 
 /**
  * 清晰度映射与服务端能力声明的**派生状态持有者**（spec §4.3 / §4.7）。
@@ -52,7 +53,7 @@ export class QualityController {
     }
     const { map, valid, dropped } = buildQualityTable(business, levels)
     this.map = map
-    for (const q of dropped) logger.warn(`[live-sdk] 档位映射失败，已剔除：id=${q.id}`)
+    for (const q of dropped) logger.warn(`[live-sdk] ${bi(`档位映射失败，已剔除：id=${q.id}`, `quality mapping failed, dropped: id=${q.id}`)}`)
     return valid
   }
 

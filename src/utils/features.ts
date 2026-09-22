@@ -1,4 +1,5 @@
 import type { FeatureKey, FeatureStatus, SideState } from '../types'
+import { bi } from './i18n'
 
 /** 客户端侧能力是否「可用」：supported=SDK 原生支持；degraded=平台接管仍可用（如原生回退投屏） */
 export function isClientUsable(state: SideState): boolean {
@@ -28,9 +29,9 @@ export function matchFeature(
 
   let detail: string | undefined
   if (!matched) {
-    detail = !clientUsable ? '客户端不支持' : !serverUsable ? '服务端未提供' : '端到端未对齐'
+    detail = !clientUsable ? bi('客户端不支持', 'unsupported by the client') : !serverUsable ? bi('服务端未提供', 'not provided by the server') : bi('端到端未对齐', 'end-to-end mismatch')
   } else if (client === 'degraded') {
-    detail = '原生回退路径，投屏由系统接管'
+    detail = bi('原生回退路径，投屏由系统接管', 'native fallback path; casting is handled by the system')
   }
   return { feature, client, server, matched, detail }
 }

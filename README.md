@@ -341,6 +341,24 @@ player.on('error', (e) => {
 >
 > SDK 侧有一道契约测试遍历全量 `ERROR_CODE`，未登记域即失败——所以你不会收到「本该有域却是 unknown」的错误码。
 
+#### 消息语言：`message` 为**中英双语**
+
+`PlayerError.message`、`logger.*` 的控制台输出、上报记录里的 `message`、`getFeatureStatus()` 的
+`detail`、以及 `LiveStatusErrorPayload.error`，全部是 **`中文 / English`** 形式：
+
+```text
+[live-sdk] 自动播放被拦截，等待用户手势 / autoplay blocked, waiting for a user gesture
+容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度… / container size is 0 (0×0); the player will show no picture. …
+媒体加载失败 / media failed to load
+```
+
+| 说明 | 内容 |
+|---|---|
+| **为什么单字段拼接** | `message` 是给人看的字段；机器可读部分（`code` / `domain` / `Events.*` / `COMMAND_NAMES`）本来就是英文标识。双语同字段让 UI 原样展示、让 Sentry 原样记录，**接入方不需要改任何代码** |
+| **中文在前** | 先读到母语信息，英文作为补充 |
+| **⚠️ 不要按 `message` 做分支或匹配** | 请用 `err.code` 或 `err.domain` —— `message` 的文本会随版本调整（本次双语化就是一次调整） |
+| **UI 控件文案不在此列** | 默认 UI 的按钮/选项文案仍是中文（属产品文案）；自绘 UI 完全不受影响 |
+
 ### 事件
 
 `Events` 枚举成员（值即对应 snake_case 字符串，`player.on(Events.FIRST_FRAME, cb)` 与 `player.on('first_frame', cb)` 等价）：
@@ -1015,6 +1033,24 @@ player.on('error', (e) => {
 > `unknown` is deliberately its own bucket: do not fold it into `decode` ("the player's own problem"). That would disguise genuine unknown failures as decode issues and send triage in the wrong direction.
 >
 > A contract test walks the full `ERROR_CODE` set and fails if any code is unregistered — so you will never receive an error that should have a domain but reports `unknown`.
+
+#### Message language: `message` is **bilingual (Chinese / English)**
+
+`PlayerError.message`, `logger.*` console output, the `message` inside report records, `getFeatureStatus()`'s
+`detail`, and `LiveStatusErrorPayload.error` are all of the form **`中文 / English`**:
+
+```text
+[live-sdk] 自动播放被拦截，等待用户手势 / autoplay blocked, waiting for a user gesture
+容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度… / container size is 0 (0×0); the player will show no picture. …
+媒体加载失败 / media failed to load
+```
+
+| Note | Detail |
+|---|---|
+| **Why one concatenated field** | `message` is the human-readable field; the machine-readable parts (`code` / `domain` / `Events.*` / `COMMAND_NAMES`) are already English identifiers. Putting both languages in the same field means your UI and your Sentry integration keep working **without any code change** |
+| **Chinese first** | Read your native language first, English as a supplement |
+| **⚠️ Never branch on or match `message`** | Use `err.code` or `err.domain` — the text of `message` changes between versions (this bilingual change is one such adjustment) |
+| **UI control labels are excluded** | The default UI's button/option labels remain Chinese (they are product copy); custom UIs are unaffected |
 
 ### Events
 

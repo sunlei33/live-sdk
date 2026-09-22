@@ -845,6 +845,29 @@
   第 29 组：`duration` 有限但内核报 live 时 noop、直播中原生 `ended` 不派发 `ENDED`）。⚠️ **真实内核下的 `duration` 取值未在 CI 自动化**
   （E2E 注入 MockKernel，不实例化 `HlsKernel`），需要真机 + 真实 HLS 直播流人工核对一次。
 
+### US-54 运行期消息中英双语（0.6.0）
+
+- **目标**：错误、日志、上报记录里的「人类可读消息」同时可读中英 —— 海外接入方不必猜中文，
+  国内排查者也不必只看英文。SDK 已发布到公开 npm、README 为中英双语，这一层是补齐。
+- **配置**：默认。无开关、无语言配置项。
+- **交互**：
+  1. 触发各类错误：主 playlist 404、解码失败（`MediaError.code = 3`）、`play()` 被自动播放策略拦截、加载超时。
+  2. 读 `player.on('error')` 的 `e.message`。
+  3. 看控制台日志（`logger`）。
+  4. 看 `getFeatureStatus()` 各项的 `detail`。
+- **预期**：
+  1. 上述消息全部形如 `中文 / English`（中文在前，` / ` 分隔）。
+  2. 机器可读字段（`code` / `domain` / `Events.*` / `COMMAND_NAMES`）**不受影响**，恒为英文标识。
+  3. 接入方**无需改代码**：UI 原样展示 `e.message`、Sentry 原样记录 `extra.message`，都能直接看到两种语言。
+  4. `Events.RETRY` 载荷与 `ReportRecord.data.message` 同样双语。
+  5. ⚠️ 文档明确要求**不要按 `message` 做分支或匹配**（用 `code` / `domain`）——
+     本次双语化正是一次 message 文本变更：按 message 匹配的接入代码会在这里断掉，而按 `code` / `domain` 的不受影响。
+  6. **UI 控件文案不在此列**：默认 UI 的按钮/选项文案仍为中文（属产品文案）；自绘 UI 完全不受影响。
+  7. **不嵌套**：`recover(code, message)` 的 message 已是双语，其 `RETRY_EXHAUSTED` 的外层消息
+     因此只带 `code`（不再拼接内层 message），避免出现 `中文 / 英文 / 中文 / 英文` 的四段式。
+- **验收方式**：单测（`test/i18n.test.ts` 锁定 `bi()` 的拼接契约；`test/features.test.ts` 锁定 `detail` 的双语文本）
+  + 冒烟（`verify/smoke.mjs`，跑 `dist/` 产物）。
+
 ---
 
 ## 附录：验收环境建议

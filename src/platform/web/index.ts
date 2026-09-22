@@ -21,6 +21,7 @@ import { WebEnvAdapter } from '../../env/WebEnvAdapter'
 import { WebMediaSurface } from './WebMediaSurface'
 import { WebHost } from './WebHost'
 import { selectWebKernel } from './selectKernel'
+import { bi } from '../../utils/i18n'
 
 /** 功能插件预设（不含内核 —— 内核由 `config.kernel` / 平台能力选路决定，见 spec §3.5）。 */
 const WEB_PRESETS: Record<string, PluginPresetEntry[]> = {
@@ -47,6 +48,9 @@ export function createWebPlatform(opts: { kernel?: KernelConstructor } = {}): Pl
       return opts.kernel ?? selectWebKernel(media, observability)
     },
     presets: WEB_PRESETS,
-    zeroSizeHint: '请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。',
+    zeroSizeHint: bi(
+      '请给容器或其父级确定的高度，例如 style="width:100%;height:300px"。',
+      'Give the container or its parent an explicit height, e.g. style="width:100%;height:300px".',
+    ),
   }
 }
