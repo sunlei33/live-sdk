@@ -103,7 +103,7 @@ describe('LivePolling 失败可见性（D1 / D3）', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(seen.errors()).toHaveLength(1)
     expect(seen.errors()[0]).toMatchObject({ url: 'https://api/status', failCount: 1, error: 'HTTP 500' })
-    expect(cap.warns.some((w) => w.includes('直播状态轮询失败'))).toBe(true)
+    expect(cap.warns.some((w) => w.includes('[LV-5007]'))).toBe(true)
   })
 
   it('网络层异常（fetch reject）同样可见，reason 取异常消息', async () => {
@@ -130,7 +130,7 @@ describe('LivePolling 失败可见性（D1 / D3）', () => {
     p.stop()
 
     expect(seen.statuses()).toHaveLength(0)
-    expect(seen.errors()[0].error).toContain('缺少可识别的状态字段')
+    expect(seen.errors()[0].error).toContain('[LV-5006]')
   })
 })
 

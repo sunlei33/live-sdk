@@ -39,14 +39,26 @@ export { LivePolling, LIVE_STATUS_ERROR_EVENT } from './plugins/LivePolling'
 export type { LiveStatus } from './plugins/LivePolling'
 
 // —— 常量 ——
-export { Events, ERROR_CODE, ERROR_DOMAIN, BUFFER_LEVEL_THRESHOLDS, bufferLevelOf, COMMAND_NAMES } from './constants'
-export type { SessionState, ErrorDomain, CommandName } from './constants'
+export {
+  Events,
+  ERROR_CODE,
+  ERROR_DOMAIN,
+  MSG,
+  DEFAULT_LOCALE,
+  BUFFER_LEVEL_THRESHOLDS,
+  bufferLevelOf,
+  COMMAND_NAMES,
+} from './constants'
+export type { SessionState, ErrorDomain, CommandName, MsgId } from './constants'
 
 // —— 工具 ——
 // 注：原先在这里导出的 `sniffer` 命名空间已移除 —— 它整个模块都是 Web 平台实现，
 // 按语义拆成两处：媒体设备能力 → `MediaSurface.canPlay()`（契约），宿主能力 → `platform/web/capabilities`。
 export { deepMerge } from './utils/config'
 export { logger, setLogLevel } from './utils/logger'
+// 运行期消息语言（全局，与 setLogLevel 同类语义）：默认 `'en'`，`setLocale('zh')` 切中文。
+// 消息编号 → 中英文案的对照表在 `utils/messages.ts`。
+export { setLocale, getLocale } from './utils/i18n'
 export { errorDomainOf } from './utils/errors'
 export { isZeroSized } from './utils/size'
 export type { ElementSize } from './utils/size'
@@ -57,6 +69,7 @@ export { resolveContainer, readElementSize } from './platform/web/dom'
 // —— 类型 ——
 export type {
   Observability,
+  Locale,
   KernelCapabilities,
   StatsInfo,
   BufferInfo,

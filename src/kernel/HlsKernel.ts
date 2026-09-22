@@ -1,6 +1,8 @@
 import Hls from 'hls.js'
 import type { BufferInfo, Kernel, KernelCapabilities, KernelOptions, LevelInfo, StatsInfo } from '../types'
+import { MSG } from '../constants'
 import { analyzeBuffer, readBuffers } from '../utils/buffer'
+import { t } from '../utils/i18n'
 import { logger } from '../utils/logger'
 
 /**
@@ -229,6 +231,6 @@ export class HlsKernel implements Kernel {
         this.opts.onEvent('frag_loaded', data)
       })
     }
-    logger.debug(`[HlsKernel] created, url=${this.currentUrl}`)
+    logger.debug(t(MSG.KERNEL_CREATED, { url: this.currentUrl }))
   }
 }

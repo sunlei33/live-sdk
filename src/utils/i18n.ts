@@ -1,44 +1,58 @@
+import { DEFAULT_LOCALE, type MsgId } from '../constants'
+import type { Locale } from '../types'
+import { MESSAGES } from './messages'
+
 /**
- * 运行期消息的双语拼接（中文在前、英文在后，以 ` / ` 分隔）。
+ * 运行期消息的语言设置与取文案入口。
  *
- * ── 为什么要它 ──
+ * ── 形态 ──
  *
- * SDK 已发布到公开 npm、README 为**中英双语**，但运行期的错误消息与日志此前只有中文：
- * `PlayerError.message`、`logger.warn/error/debug`、上报记录里的 `message` 全是中文，
- * 海外的接入方看不懂，而国内排查的人又需要中文。单字段拼接让**同一条信息同时可读两种语言**。
+ * 每条消息有一个**稳定编号**（`constants.ts#MSG`，形如 `LV-3004`）与**中英两套文案**
+ * （`utils/messages.ts`）。`t(id, params)` 按当前 locale 取一种，返回 `[LV-3004] 文案`。
  *
- * 中文在前的理由：与 README / 文档的双语顺序一致，也与中文日志的既有阅读顺序一致
- * （排查时扫一眼开头就能拿到母语信息，英文作为补充）。
+ * ── 为什么要编号，且编号随消息一起输出 ──
  *
- * ── 为什么不拆成 `message` + `messageEn` 两个字段 ──
+ * 文案会随**语言**和**版本**变化，编号不变：用户报障可直接引用 `[LV-3004]`，文档与排查手册
+ * 按编号索引，接入方的告警规则也能锚定编号 —— 不必再依赖易变的 message 文本
+ * （历史上 message 从中文 → 「中文 / English」→ 单语编号化，已经变过两次）。
  *
- * 那要求消费方**改代码**才能读到另一种语言。而 `message` 本就是给人看的字段 ——
- * 机器可读的部分早就是英文的：`code`（`ERROR_CODE`）、`domain`（`ERROR_DOMAIN`）、
- * `Events.COMMAND` 的 `name`（`COMMAND_NAMES`）。**语言只影响"给人看的那一份"**，
- * 用双字段等于把「读哪种语言」这个显示层选择推给业务，而业务通常只想原样展示/上报。
+ * ── locale 是**全局单例**语义（与 `setLogLevel` 同类）──
  *
- * ── 为什么不做成可切换的语言包 ──
+ * 由 `new Player(...)` 构造时按 `PlayerConfig.locale` 写入。因此**同一页面多个 Player 实例
+ * 共用最后一次设置的语言** —— 与日志级别完全一致的行为（两者都是进程级的显示偏好）。
+ * 需要按实例区分语言时，请消费与语言无关的数据：`PlayerError.code`、`ERROR_DOMAIN`、`MSG` 编号。
  *
- * `PlayerConfig` 目前没有语言配置，加一个会扩大配置面；而错误/日志是**低频、非 UI** 的通道，
- * 双语拼接不会造成噪声（单条消息长一倍，但不影响任何逻辑：没有按 message 做分支的代码，
- * 文档也明确要求**不要**按 message 匹配、要用 `code` / `domain`）。
+ * ── 为什么默认英文 ──
  *
- * ── 边界 ──
- *
- * 只覆盖**运行期消息**（错误 / 日志 / 上报）。**UI 控件文案不在此列** —— 那是产品文案，
- * 应由接入方按自己的语言策略决定（当前默认 UI 的文案仍是中文；自绘 UI 完全不受影响）。
- *
- * ── 典型用法 ──
- *
- * ```ts
- * logger.warn(`[live-sdk] ${bi('自动播放被拦截，等待用户手势', 'autoplay blocked, waiting for user gesture')}`)
- * this.recover(ERROR_CODE.NETWORK_ERROR, bi('缓冲停滞超时', 'buffer stalled, timed out'))
- * ```
- *
- * ⚠️ **不要嵌套调用**：`bi(a, b)` 的结果若再被 `bi()` 包一次，会得到
- * `中文A / 英文A / 中文B / 英文B` 这种四段式。需要组合时，外层只拼双语一次
- * （见 `Player#recover` 对 `RETRY_EXHAUSTED` 的处理）。
+ * SDK 发布在公开 npm、README 为中英双语，日志与错误首先面向更广的读者；中文使用方显式传
+ * `locale: 'zh'` 即可（一行配置）。**UI 控件文案不在此机制内**（属产品文案，见 README「消息语言」）。
  */
-export function bi(zh: string, en: string): string {
-  return `${zh} / ${en}`
+let currentLocale: Locale = DEFAULT_LOCALE
+
+export function setLocale(locale: Locale): void {
+  currentLocale = locale
+}
+
+export function getLocale(): Locale {
+  return currentLocale
+}
+
+/**
+ * 取文案：`[LV-xxxx] <当前语言的文案>`。
+ *
+ * `params` 用于插值 `{name}` 占位符；**未提供的占位符原样保留**（便于一眼看出漏传参数，
+ * 而不是静默变成 `undefined`）。
+ */
+export function t(id: MsgId, params?: Record<string, string | number>): string {
+  const entry = MESSAGES[id]
+  // 理论上不可达（`Record<MsgId, …>` 已穷尽），兜底成编号本身 —— 绝不让日志因缺文案而抛错
+  const text = entry ? entry[currentLocale] : id
+  return `[${id}] ${interpolate(text, params)}`
+}
+
+function interpolate(text: string, params?: Record<string, string | number>): string {
+  if (!params) return text
+  return text.replace(/\{(\w+)\}/g, (matched, key: string) =>
+    key in params ? String(params[key]) : matched,
+  )
 }

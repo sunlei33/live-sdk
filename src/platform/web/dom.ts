@@ -15,7 +15,8 @@
  * 于是「core 是否依赖了平台」可以按"模块是否读 DOM"自动判定，无需人工维护白名单。
  */
 
-import { bi } from '../../utils/i18n'
+import { MSG } from '../../constants'
+import { t } from '../../utils/i18n'
 
 export interface ElementSize {
   width: number
@@ -26,7 +27,7 @@ export interface ElementSize {
 export function resolveContainer(container: string | HTMLElement): HTMLElement {
   if (typeof container === 'string') {
     const el = document.querySelector<HTMLElement>(container)
-    if (!el) throw new Error(`[live-sdk] ${bi(`container 未找到：${container}`, `container not found: ${container}`)}`)
+    if (!el) throw new Error(`[live-sdk] ${t(MSG.CONTAINER_NOT_FOUND, { container })}`)
     return el
   }
   return container

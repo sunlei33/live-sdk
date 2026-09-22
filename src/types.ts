@@ -11,6 +11,15 @@ import type { CommandName, ErrorDomain, SessionState } from './constants'
 /** 观测深度：full=深度采集（分片/缓冲/码率/ABR/速率），basic=仅 <video> 标准事件 */
 export type Observability = 'full' | 'basic'
 
+/**
+ * 运行期消息语言（`PlayerConfig.locale`）：`en`（默认）| `zh`。
+ *
+ * 只影响**运行期消息** —— 错误 / 日志 / 上报记录 / `FeatureStatus.detail` / `zeroSizeHint`。
+ * **不含 UI 控件文案**（那是产品文案，默认 UI 的按钮标签仍为中文）。
+ * 实现见 `utils/i18n.ts`，文案表见 `utils/messages.ts`（编号 → 中英文）。
+ */
+export type Locale = 'en' | 'zh'
+
 // ───────────────────────────── 内核抽象 ─────────────────────────────
 
 /** 内核能力位（用于上层据此隐藏/降级入口） */
@@ -706,6 +715,14 @@ export interface PlayerConfig {
   ignores?: string[] // 关闭 Preset 内功能插件
   network?: Partial<NetworkConfig> // 网络敏感策略参数
   observability?: Observability // 默认 'full'
+  /**
+   * 运行期消息语言，默认 `'en'`。只影响错误 / 日志 / 上报记录 / `FeatureStatus.detail` /
+   * `zeroSizeHint`；**不含 UI 控件文案**。
+   *
+   * 语义是**全局**的（与 `setLogLevel` 同类，见 `utils/i18n.ts`）：同一页面多个实例共用
+   * 最后一次设置的语言 —— 两者都是进程级的显示偏好。
+   */
+  locale?: Locale
   env?: EnvAdapter // 默认 WebEnvAdapter
   posterMode?: PosterMode // 封面图呈现方式，默认 'native'（MSE 路径建议 'overlay'）
 }

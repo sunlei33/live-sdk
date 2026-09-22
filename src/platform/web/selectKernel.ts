@@ -16,7 +16,8 @@ import type { KernelConstructor, MediaSurface, Observability } from '../../types
 import { HlsKernel } from '../../kernel/HlsKernel'
 import { NativeKernel } from '../../kernel/NativeKernel'
 import { MIME_HLS, MIME_MP4, supportsMSE } from './capabilities'
-import { bi } from '../../utils/i18n'
+import { MSG } from '../../constants'
+import { t } from '../../utils/i18n'
 
 export function selectWebKernel(media: MediaSurface, observability: Observability): KernelConstructor {
   if (observability === 'full') {
@@ -27,5 +28,5 @@ export function selectWebKernel(media: MediaSurface, observability: Observabilit
   if (media.canPlay(MIME_HLS)) return NativeKernel
   if (media.canPlay(MIME_MP4)) return NativeKernel // 渐进式 MP4 直连
   if (supportsMSE() && HlsKernel.isSupported()) return HlsKernel
-  throw new Error(bi('平台不支持任何可用播放内核', 'the platform supports no usable playback kernel'))
+  throw new Error(t(MSG.NO_USABLE_KERNEL))
 }

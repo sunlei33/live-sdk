@@ -290,7 +290,7 @@ describe('平台接缝：非 DOM 宿主也能跑通（架构适配性的直接�
     await p1.play()
     await p1.play() // 再起播一次：仍只告警一次
     expect(warnSpy).toHaveBeenCalledTimes(1)
-    expect(String(warnSpy.mock.calls[0]?.[0])).toContain('容器尺寸为 0（0×0）')
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain('[LV-4005]')
     expect(String(warnSpy.mock.calls[0]?.[0])).toContain('假平台提示')
     p1.destroy()
 

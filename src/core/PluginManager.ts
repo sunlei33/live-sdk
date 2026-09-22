@@ -1,7 +1,8 @@
 import type { Plugin, PluginConstructor, PluginInput } from '../types'
 import type { Player } from './Player'
+import { MSG } from '../constants'
 import { logger } from '../utils/logger'
-import { bi } from '../utils/i18n'
+import { t } from '../utils/i18n'
 
 /**
  * PluginManager：插件注册/注销/生命周期调度。
@@ -23,9 +24,9 @@ export class PluginManager {
   add(input: PluginInput, config?: unknown): Plugin {
     const instance = typeof input === 'function' ? new (input as PluginConstructor)() : input
     const name = instance.name ?? (instance as { constructor?: { name?: string } }).constructor?.name
-    if (!name) throw new Error(`[plugin] ${bi('插件缺少 name，无法注册', 'plugin is missing a name, cannot register')}`)
+    if (!name) throw new Error(`[plugin] ${t(MSG.PLUGIN_NAME_MISSING)}`)
     if (this.plugins.has(name)) {
-      logger.warn(`[plugin] ${bi(`同名插件已存在，跳过：${name}`, `a plugin with the same name already exists, skipped: ${name}`)}`)
+      logger.warn(`[plugin] ${t(MSG.PLUGIN_DUPLICATE, { name })}`)
       return this.plugins.get(name)!
     }
     instance.create(this.player)
@@ -36,7 +37,7 @@ export class PluginManager {
       try {
         instance.ready()
       } catch (err) {
-        logger.error(`[plugin] ${bi(`ready() 异常 ${name}`, `ready() threw ${name}`)}`, err)
+        logger.error(`[plugin] ${t(MSG.PLUGIN_READY_THREW, { name })}`, err)
       }
     }
     return instance
@@ -48,7 +49,7 @@ export class PluginManager {
     try {
       instance.destroy()
     } catch (err) {
-      logger.error(`[plugin] ${bi(`destroy() 异常 ${name}`, `destroy() threw ${name}`)}`, err)
+      logger.error(`[plugin] ${t(MSG.PLUGIN_DESTROY_THREW, { name })}`, err)
     }
     this.plugins.delete(name)
   }
@@ -59,7 +60,7 @@ export class PluginManager {
       try {
         instance.ready()
       } catch (err) {
-        logger.error(`[plugin] ${bi(`ready() 异常 ${name}`, `ready() threw ${name}`)}`, err)
+        logger.error(`[plugin] ${t(MSG.PLUGIN_READY_THREW, { name })}`, err)
       }
     }
   }
@@ -78,7 +79,7 @@ export class PluginManager {
       try {
         instance.destroy()
       } catch (err) {
-        logger.error(`[plugin] ${bi(`destroy() 异常 ${name}`, `destroy() threw ${name}`)}`, err)
+        logger.error(`[plugin] ${t(MSG.PLUGIN_DESTROY_THREW, { name })}`, err)
       }
     }
     this.plugins.clear()

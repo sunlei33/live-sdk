@@ -542,7 +542,7 @@ check('destroy 后 root 已移除', true)
   const callsAtStop = call
   await new Promise((r) => setTimeout(r, 80))
 
-  check('轮询失败有日志（旧实现为空 catch，完全静默）', warns.some((w) => w.includes('直播状态轮询失败')))
+  check('轮询失败有日志（旧实现为空 catch，完全静默）', warns.some((w) => w.includes('[LV-5007]')))
   check('HTTP 500 也触发 live_status_error（旧实现连 catch 都进不去）', events.length > 0 && events[0].error === 'HTTP 500')
   check('失败事件携带 url / failCount / error / time', events[0].url === 'https://api/status' && events[0].failCount === 1 && typeof events[0].time === 'number')
   check('连续失败的事件被节流（事件数远少于请求数）', events.length < call && events.every((e) => e.failCount === 1 || e.failCount === 3))
@@ -744,7 +744,7 @@ check('destroy 后 root 已移除', true)
   console.warn = (...a) => noMeasureWarns.push(a.map(String).join(' '))
   await pSize.play('https://cdn/size.m3u8')
   console.warn = orig
-  check('测不到尺寸时不告警（不把「测不到」当 0）', !noMeasureWarns.some((w) => w.includes('容器尺寸为 0')))
+  check('测不到尺寸时不告警（不把「测不到」当 0）', !noMeasureWarns.some((w) => w.includes('[LV-4005]')))
 
   // 明确报告 0 尺寸 → 告警，且只报一次
   pSize.root.getBoundingClientRect = () => ({ width: 0, height: 0 })
@@ -753,7 +753,7 @@ check('destroy 后 root 已移除', true)
   await pSize.play('https://cdn/size2.m3u8')
   await pSize.play('https://cdn/size3.m3u8')
   console.warn = orig
-  check('零尺寸时告警一次且不重复', zeroWarns.filter((w) => w.includes('容器尺寸为 0')).length === 1)
+  check('零尺寸时告警一次且不重复', zeroWarns.filter((w) => w.includes('[LV-4005]')).length === 1)
   pSize.destroy()
 
   // ══════════ 28：媒体能力查询 player.canPlay()（原 sniffer 的公开替代） ══════════

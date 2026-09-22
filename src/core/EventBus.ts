@@ -1,4 +1,7 @@
 /** 事件发布订阅：统一事件常量（Events）+ 回调注册，避免魔法字符串 */
+import { MSG } from '../constants'
+import { t } from '../utils/i18n'
+
 export type EventHandler = (data?: unknown) => void
 
 export class EventBus {
@@ -40,7 +43,7 @@ export class EventBus {
       } catch (err) {
         // 监听器异常不阻断其它监听器，也不抛给接入方
         // eslint-disable-next-line no-console
-        console.error('[live-sdk] event handler error:', event, err)
+        console.error('[live-sdk]', t(MSG.EVENT_HANDLER_THREW, { event }), err)
       }
     }
   }

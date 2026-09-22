@@ -1,4 +1,4 @@
-import type { NetworkConfig, NetworkQuality, PlayerConfig } from './types'
+import type { Locale, NetworkConfig, NetworkQuality, PlayerConfig } from './types'
 
 /**
  * 统一事件常量：值即对应的小写 snake_case 字符串，
@@ -81,6 +81,118 @@ export const ERROR_DOMAIN = {
 export type ErrorDomain = (typeof ERROR_DOMAIN)[keyof typeof ERROR_DOMAIN]
 
 /**
+ * 运行期消息编号：日志与错误文案的**稳定标识**（`LV-<分区><序号>`）。
+ *
+ * **为什么要编号**：文案会随语言（`PlayerConfig.locale`）和版本变化，但**编号不变** ——
+ * 用户报障时可直接引用（`[LV-3004]`），文档与排查手册能按编号索引，接入方的告警规则也能锚定编号
+ * 而不必依赖易变的 message 文本。编号随消息一同输出（见 `utils/i18n.ts#t`）。
+ *
+ * | 段 | 主题 |
+ * |---|---|
+ * | `LV-1xxx` | 命令与交互（seek / 倍速 / 自动播放 …） |
+ * | `LV-2xxx` | 内核与媒体（选路 / 媒体错误 / 内核生命周期） |
+ * | `LV-3xxx` | 网络与重连（重连 / 超时 / 断流 / 网络断开） |
+ * | `LV-4xxx` | 配置与接入（地址缺失 / 容器尺寸 / 配置解析） |
+ * | `LV-5xxx` | 插件（注册与生命周期 / LivePolling） |
+ * | `LV-6xxx` | 能力对齐与档位 |
+ * | `LV-9xxx` | 兜底与内部不变量 |
+ *
+ * ⚠️ **编号一经发布不再改动、也不复用**（复用会让历史日志指向另一条消息）。
+ * 文案表（编号 → 中英文）在 `utils/messages.ts`。
+ */
+export const MSG = {
+  // —— LV-1xxx 命令与交互 ——
+  /** seek 在直播中不生效（debug） */
+  SEEK_LIVE_NOOP: 'LV-1001',
+  /** 倍速入参非法被忽略（warn） */
+  RATE_INVALID: 'LV-1002',
+  /** setAppState 传入非 app.* 键（warn） */
+  APP_STATE_KEY_IGNORED: 'LV-1003',
+  /** 自动播放被策略拦截（warn） */
+  AUTOPLAY_BLOCKED: 'LV-1004',
+  /** play() 失败（error.message） */
+  PLAY_FAILED: 'LV-1005',
+
+  // —— LV-2xxx 内核与媒体 ——
+  /** 媒体加载失败（error.message 兜底） */
+  MEDIA_LOAD_FAILED: 'LV-2001',
+  /** 平台侧无任何可用内核（throw） */
+  NO_USABLE_KERNEL: 'LV-2002',
+  /** HlsKernel 实例创建（debug） */
+  KERNEL_CREATED: 'LV-2003',
+
+  // —— LV-3xxx 网络与重连 ——
+  /** 直播中收到原生 ended，按断流恢复（debug） */
+  LIVE_ENDED_NATIVE: 'LV-3001',
+  /** 直播流停止更新（recover 的 message） */
+  LIVE_STREAM_STALLED: 'LV-3002',
+  /** 缓冲停滞超时（recover 的 message） */
+  BUFFER_STALL_TIMEOUT: 'LV-3003',
+  /** 重试耗尽（error.message） */
+  RETRY_EXHAUSTED: 'LV-3004',
+  /** 触发重连（warn） */
+  RETRY_START: 'LV-3005',
+  /** 第 N 次重连（warn） */
+  RETRY_ATTEMPT: 'LV-3006',
+  /** 回前台恢复（recover 的 message） */
+  FOREGROUND_RECOVER: 'LV-3007',
+  /** 网络断开、等待恢复（warn） */
+  NETWORK_OFFLINE: 'LV-3008',
+  /** 加载超时（error.message） */
+  LOAD_TIMEOUT: 'LV-3009',
+
+  // —— LV-4xxx 配置与接入 ——
+  /** 未提供播放地址（throw） */
+  NO_PLAY_URL: 'LV-4001',
+  /** PlayConfig.url 缺失（throw） */
+  PLAY_URL_MISSING: 'LV-4002',
+  /** 起播配置解析失败（error.message） */
+  CONFIG_RESOLVE_FAILED: 'LV-4003',
+  /** 容器选择器解析不到元素（throw） */
+  CONTAINER_NOT_FOUND: 'LV-4004',
+  /** 容器零尺寸告警（warn） */
+  ZERO_SIZE_WARNING: 'LV-4005',
+  /** 零尺寸告警附带的排查提示（`zeroSizeHint`，平台提供） */
+  ZERO_SIZE_HINT: 'LV-4006',
+  /** 内核未初始化（throw） */
+  KERNEL_NOT_INITIALIZED: 'LV-4007',
+
+  // —— LV-5xxx 插件 ——
+  /** reporter 抛异常（error） */
+  REPORTER_THREW: 'LV-5001',
+  /** 插件缺少 name、无法注册（throw） */
+  PLUGIN_NAME_MISSING: 'LV-5002',
+  /** 同名插件已存在、被跳过（warn） */
+  PLUGIN_DUPLICATE: 'LV-5003',
+  /** 插件 ready() 抛异常（error） */
+  PLUGIN_READY_THREW: 'LV-5004',
+  /** 插件 destroy() 抛异常（error） */
+  PLUGIN_DESTROY_THREW: 'LV-5005',
+  /** 轮询响应缺少可识别状态字段（`live_status_error.error`） */
+  LIVE_POLLING_NO_STATUS: 'LV-5006',
+  /** 直播状态轮询失败（warn） */
+  LIVE_POLLING_FAILED: 'LV-5007',
+
+  // —— LV-6xxx 能力对齐与档位 ——
+  /** 档位映射失败、被剔除（warn） */
+  QUALITY_MAPPING_DROPPED: 'LV-6001',
+  /** 能力对不齐：客户端不支持（`FeatureStatus.detail`） */
+  FEATURE_CLIENT_UNSUPPORTED: 'LV-6002',
+  /** 能力对不齐：服务端未提供（`FeatureStatus.detail`） */
+  FEATURE_SERVER_ABSENT: 'LV-6003',
+  /** 能力对不齐：端到端未匹配（`FeatureStatus.detail`） */
+  FEATURE_MISMATCH: 'LV-6004',
+  /** 原生回退路径说明（`FeatureStatus.detail`） */
+  FEATURE_NATIVE_FALLBACK: 'LV-6005',
+
+  // —— LV-9xxx 兜底与内部不变量 ——
+  /** 事件处理器抛异常（`console.error`） */
+  EVENT_HANDLER_THREW: 'LV-9001',
+} as const
+
+export type MsgId = (typeof MSG)[keyof typeof MSG]
+
+/**
  * 命令名：`COMMAND` 事件的 `name` 字段，与 `PlayerCommands` 的键一一对应（**12 个，全覆盖**）。
  * 放在常量里而非从类型推导，是为了让运行时也能枚举校验（见 `verify/smoke.mjs`）。
  */
@@ -151,6 +263,16 @@ export const DEFAULT_NETWORK_STRATEGY: NetworkConfig = {
   loadTimeout: (q: NetworkQuality) => (q === 'poor' ? 20000 : q === 'fair' ? 12000 : 8000),
 }
 
+/**
+ * 运行期消息的缺省语言：**英文**。
+ *
+ * 为什么默认英文：SDK 发布在公开 npm、README 为中英双语，日志与错误首先面向更广的读者；
+ * 中文使用方显式传 `PlayerConfig.locale: 'zh'` 即可（一行配置）。
+ * 只影响运行期消息（错误 / 日志 / 上报 / `FeatureStatus.detail` / `zeroSizeHint`），
+ * **不含 UI 控件文案**（属产品文案）。文案表见 `utils/messages.ts`。
+ */
+export const DEFAULT_LOCALE: Locale = 'en'
+
 /** 配置默认值（deep merge 的底层） */
 export const DEFAULT_CONFIG: Required<PlayerConfig> = {
   container: '',
@@ -163,6 +285,7 @@ export const DEFAULT_CONFIG: Required<PlayerConfig> = {
   ignores: [],
   network: { ...DEFAULT_NETWORK_STRATEGY },
   observability: 'full',
+  locale: DEFAULT_LOCALE,
   env: undefined,
   posterMode: 'native',
 } as unknown as Required<PlayerConfig>

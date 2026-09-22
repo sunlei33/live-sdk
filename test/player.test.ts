@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { installDom, makeEl, makeTimeRanges, type FakeMediaElement } from './fixtures/dom'
-import { ERROR_CODE, COMMAND_NAMES, ERROR_DOMAIN } from '../src/constants'
+import { ERROR_CODE, COMMAND_NAMES, ERROR_DOMAIN, DEFAULT_LOCALE } from '../src/constants'
+import { getLocale, setLocale } from '../src/utils/i18n'
 
 type Dom = ReturnType<typeof installDom>
 type PlayerInstance = import('../src/core/Player').Player
@@ -74,6 +75,8 @@ beforeEach(async () => {
 afterEach(() => {
   vi.useRealTimers()
   dom.reset()
+  // locale 是全局单例（与 setLogLevel 同类语义）→ 用例结束后复位，避免污染后续用例
+  setLocale(DEFAULT_LOCALE)
 })
 
 function createPlayer(
@@ -794,6 +797,8 @@ describe('COMMAND 事件（统一命令观测）', () => {
     p.destroy()
   })
 
+
+
   it('applied：switchQuality 传入档位表里没有的 id → false', async () => {
     const p = createPlayer()
     const seen: Seen[] = []
@@ -842,7 +847,8 @@ describe('容器零尺寸告警', () => {
     ;(p.root as unknown as { getBoundingClientRect: () => { width: number; height: number } }).getBoundingClientRect =
       () => ({ width, height })
   }
-  const hit = (warns: string[]) => warns.filter((w) => w.includes('容器尺寸为 0')).length
+  // 锚定**消息编号**（与语言无关），而不是文案本身 —— 文案随 locale 变，编号不变
+  const hit = (warns: string[]) => warns.filter((w) => w.includes('[LV-4005]')).length
 
   it('零尺寸 → 起播时告警一次，重复起播不重复告警', async () => {
     const p = createPlayer()
@@ -893,6 +899,38 @@ describe('容器零尺寸告警', () => {
       cap.restore()
     }
     expect(hit(cap.warns)).toBe(0)
+    p.destroy()
+  })
+})
+
+describe('运行期消息语言（PlayerConfig.locale，默认 en）', () => {
+  /** 取一条 SDK 自产消息：`play({})` 缺 url → throw（[LV-4002]） */
+  async function playWithoutUrl(p: PlayerInstance): Promise<string> {
+    try {
+      await p.play({} as never)
+    } catch (e) {
+      return (e as Error).message
+    }
+    return ''
+  }
+
+  it('默认英文；显式 locale: "zh" 时同一条编号给中文', async () => {
+    const pEn = createPlayer()
+    expect(getLocale()).toBe('en')
+    expect(await playWithoutUrl(pEn)).toBe('[LV-4002] PlayConfig.url is missing')
+    pEn.destroy()
+
+    const pZh = createPlayer({ locale: 'zh' })
+    expect(getLocale()).toBe('zh')
+    expect(await playWithoutUrl(pZh)).toBe('[LV-4002] PlayConfig.url 缺失')
+    pZh.destroy()
+  })
+
+  it('消息自带 [LV-xxxx] 编号前缀 —— 与语言无关，接入方可直接锚定编号做告警', async () => {
+    const p = createPlayer()
+    const msg = await playWithoutUrl(p)
+    expect(msg.startsWith('[LV-4002] ')).toBe(true)
+    // 编号恒定，只有后半段随语言变化（上一用例已覆盖中文）
     p.destroy()
   })
 })

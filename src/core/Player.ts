@@ -8,6 +8,8 @@ import { SessionMetrics } from './SessionMetrics'
 import {
   Events,
   ERROR_CODE,
+  MSG,
+  DEFAULT_LOCALE,
   DEFAULT_CONFIG,
   DEFAULT_NETWORK_STRATEGY,
   bufferLevelOf,
@@ -20,7 +22,7 @@ import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/r
 import { matchFeature } from '../utils/features'
 import { mapErrorCode, isFatalKernelError, mapMediaErrorCode, errorDomainOf } from '../utils/errors'
 import { isZeroSized } from '../utils/size'
-import { bi } from '../utils/i18n'
+import { setLocale, t } from '../utils/i18n'
 import type {
   AppStateKey,
   BufferInfo,
@@ -152,6 +154,8 @@ export class Player {
     const merged = deepMerge<PlayerConfig>(DEFAULT_CONFIG as PlayerConfig, config)
     merged.network = deepMerge<NetworkConfig>(DEFAULT_NETWORK_STRATEGY, config.network)
     this.config = merged as Player['config']
+    // 运行期消息语言：**全局**设置（与 setLogLevel 同类语义），必须早于任何可能产出消息的动作
+    setLocale(this.config.locale ?? DEFAULT_LOCALE)
 
     // 2. 挂载：容器解析、根节点创建、media 挂进 DOM 全部由承载面负责（core 不碰 DOM）
     this.surface = platform.media
@@ -300,7 +304,7 @@ export class Player {
     try {
       cfg = await this.resolveConfig(input)
     } catch (err) {
-      const e = this.makeError(ERROR_CODE.CONFIG_RESOLVE_FAILED, bi(`起播配置解析失败：${(err as Error).message}`, `Failed to resolve play config: ${(err as Error).message}`), true)
+      const e = this.makeError(ERROR_CODE.CONFIG_RESOLVE_FAILED, t(MSG.CONFIG_RESOLVE_FAILED, { detail: (err as Error).message }), true)
       this.dispatchError(e)
       this.emitCommand('play', 'after', false)
       throw err
@@ -435,7 +439,7 @@ export class Player {
     this.emitCommand('switchURL', 'before')
     if (this.destroyed || !this.kernel) {
       this.emitCommand('switchURL', 'after', false)
-      throw new Error(bi('内核未初始化', 'kernel not initialized'))
+      throw new Error(t(MSG.KERNEL_NOT_INITIALIZED))
     }
     const ctx = this.hookCtx({ url })
     if (await this.hookBefore('switchURL', ctx)) {
@@ -498,7 +502,7 @@ export class Player {
       return
     }
     if (this.isLiveNow()) {
-      logger.debug(`[live-sdk] ${bi('seek 在直播流上不生效（点播/重播态可用）', 'seek has no effect on a live stream (available for VOD/replay)')}`)
+      logger.debug(`[live-sdk] ${t(MSG.SEEK_LIVE_NOOP)}`)
       this.emitCommand('seek', 'after', false)
       return
     }
@@ -526,7 +530,7 @@ export class Player {
     try {
       this.surface.playbackRate = rate
     } catch {
-      logger.warn(`[live-sdk] ${bi(`倍速入参非法，已忽略：${rate}`, `invalid playback rate, ignored: ${rate}`)}`)
+      logger.warn(`[live-sdk] ${t(MSG.RATE_INVALID, { rate })}`)
       this.emitCommand('setPlaybackRate', 'after', false)
       return
     }
@@ -580,7 +584,7 @@ export class Player {
     for (const [k, v] of Object.entries(patch)) {
       if (!k.startsWith('app.')) {
         // 前缀由 logger 统一补（[live-sdk]），此处只给模块标签
-        logger.warn(`[state] ${bi(`setAppState 忽略非 app.* 键：${k}`, `setAppState ignored non-app.* key: ${k}`)}`)
+        logger.warn(`[state] ${t(MSG.APP_STATE_KEY_IGNORED, { key: k })}`)
         continue
       }
       safe[k] = v
@@ -840,7 +844,7 @@ export class Player {
   private async resolveConfig(input?: PlayInput): Promise<PlayConfig> {
     let raw: PlayInput
     if (input === undefined) {
-      if (!this.config.url) throw new Error(bi('未提供播放地址（createPlayer.url 或 play(PlayConfig)）', 'no playback URL provided (createPlayer.url or play(PlayConfig))'))
+      if (!this.config.url) throw new Error(t(MSG.NO_PLAY_URL))
       raw = this.config.url
     } else {
       raw = input
@@ -849,7 +853,7 @@ export class Player {
     if (typeof raw === 'string') cfg = { url: raw }
     else if (typeof raw === 'function') cfg = await raw()
     else cfg = raw
-    if (!cfg || !cfg.url) throw new Error(bi('PlayConfig.url 缺失', 'PlayConfig.url is missing'))
+    if (!cfg || !cfg.url) throw new Error(t(MSG.PLAY_URL_MISSING))
     return cfg
   }
 
@@ -1001,8 +1005,8 @@ export class Player {
    */
   private onMediaEnded(): void {
     if (this.isLiveNow()) {
-      logger.debug(`[live-sdk] ${bi('直播中收到原生 ended（播放点追至流末尾）→ 按断流恢复', 'native ended while live (playhead reached the end of the stream) -> treating as stream-interruption recovery')}`)
-      this.recover(ERROR_CODE.NETWORK_ERROR, bi('直播流停止更新（播放点追至末尾）', 'live stream stopped updating (playhead reached the end)'))
+      logger.debug(`[live-sdk] ${t(MSG.LIVE_ENDED_NATIVE)}`)
+      this.recover(ERROR_CODE.NETWORK_ERROR, t(MSG.LIVE_STREAM_STALLED))
       return
     }
     this.playIntent = false
@@ -1034,7 +1038,7 @@ export class Player {
     const mediaError = this.surface.error()
     const mapped = mapMediaErrorCode(mediaError?.code, mediaError?.message)
     if (!mapped) return // code=1：换源 / 销毁引发的中止，不是故障
-    this.dispatchError(this.makeError(mapped.code, mediaError?.message || bi('媒体加载失败', 'media failed to load'), mapped.fatal))
+    this.dispatchError(this.makeError(mapped.code, mediaError?.message || t(MSG.MEDIA_LOAD_FAILED), mapped.fatal))
   }
 
   /** 把全屏真实状态同步到快照（去重后写，避免重复事件驱动无意义的重渲染）。 */
@@ -1130,7 +1134,7 @@ export class Player {
           return
         }
         this.stateMachine.transition('timeout')
-        this.recover(ERROR_CODE.LOAD_TIMEOUT, bi('缓冲停滞超时', 'buffer stalled, timed out'))
+        this.recover(ERROR_CODE.LOAD_TIMEOUT, t(MSG.BUFFER_STALL_TIMEOUT))
       }
     }, timeout)
     this.addTimer(timer)
@@ -1222,7 +1226,7 @@ export class Player {
     this.sizeWarned = true
     // 排查提示是**平台相关**的（Web 给 CSS 例子，其他宿主写法不同）→ 由平台包提供
     const hint = this.platform.zeroSizeHint ? ` ${this.platform.zeroSizeHint}` : ''
-    logger.warn(bi(`容器尺寸为 0（${size.width}×${size.height}），播放器不会有可见画面。${hint}`, `container size is 0 (${size.width}×${size.height}); the player will show no picture. ${hint}`))
+    logger.warn(t(MSG.ZERO_SIZE_WARNING, { width: size.width, height: size.height, hint }))
   }
 
   // ═══════════════ 内部：封面图层（posterMode） ═══════════════
@@ -1294,7 +1298,7 @@ export class Player {
       this.playIntent = false
       this.mediaPaused = true
       this.state.set({ playing: false })
-      logger.warn(`[live-sdk] ${bi('自动播放被拦截，等待用户手势', 'autoplay blocked, waiting for a user gesture')}`)
+      logger.warn(`[live-sdk] ${t(MSG.AUTOPLAY_BLOCKED)}`)
       return true
     }
     return false
@@ -1312,7 +1316,7 @@ export class Player {
     if (!p || typeof p.catch !== 'function') return
     p.catch((err) => {
       if (this.handlePlayRejection(err)) return
-      this.dispatchError(this.makeError(ERROR_CODE.UNKNOWN, bi(`播放失败：${(err as Error).message}`, `Playback failed: ${(err as Error).message}`), false))
+      this.dispatchError(this.makeError(ERROR_CODE.UNKNOWN, t(MSG.PLAY_FAILED, { detail: (err as Error).message }), false))
     })
   }
 
@@ -1407,7 +1411,7 @@ export class Player {
       this.dispatchError(
         this.makeError(
           ERROR_CODE.RETRY_EXHAUSTED,
-          bi(`重试 ${max} 次后仍失败（${code}）`, `Retry exhausted after ${max} attempts (${code})`),
+          t(MSG.RETRY_EXHAUSTED, { max, code }),
           true,
           this.buildDiagnostic(code, 0),
         ),
@@ -1418,7 +1422,7 @@ export class Player {
     const base = this.resolveTunable(this.config.network.retryDelay)
     const delay = computeRetryDelay(base, this.retryCount)
     const diagnostic = this.buildDiagnostic(code, delay)
-    logger.warn(`[live-sdk] ${bi('触发重连', 'reconnecting')}`, diagnostic)
+    logger.warn(`[live-sdk] ${t(MSG.RETRY_START)}`, diagnostic)
     this.emit(Events.RETRY, { code, retryCount: this.retryCount, delay, diagnostic })
     // 诊断快照**嵌套在 `diagnostic` 下**，与 error 记录保持同一形状 ——
     // 早先这里是 `{ message, ...diagnostic }`（平铺），导致同一条文档承诺
@@ -1436,7 +1440,7 @@ export class Player {
     const useBackup = !!cfg.backup && this.retryCount === 1
     const url = useBackup ? (cfg.backup as string) : cfg.url
     const diag = this.buildDiagnostic(code, diagnostic?.delay ?? 0, url)
-    logger.warn(`[live-sdk] ${bi(`重连第 ${this.retryCount} 次 (${code}) → ${url}`, `reconnect attempt #${this.retryCount} (${code}) → ${url}`)}`, diag)
+    logger.warn(`[live-sdk] ${t(MSG.RETRY_ATTEMPT, { count: this.retryCount, code, url })}`, diag)
     // 若用户的意图仍是播放，重连期间保持按钮为「播放中」，避免 UI 在退避等待中闪现暂停图标
     this.mediaPaused = false
     // 同步「当前是否在播备用流」：第 1 次重连换 backup，其后各次回主地址。
@@ -1559,14 +1563,14 @@ export class Player {
   private onForeground(): void {
     // 回前台：检查并续播（结合断流重连）
     if (this.stateMachine.current === 'error' || this.stateMachine.current === 'stalled') {
-      this.recover(ERROR_CODE.NETWORK_ERROR, bi('回前台恢复', 'recover on returning to foreground'))
+      this.recover(ERROR_CODE.NETWORK_ERROR, t(MSG.FOREGROUND_RECOVER))
     } else if (this.currentPlayConfig?.liveStatus) {
       this.livePolling()?.start(this.currentPlayConfig.liveStatus)
     }
   }
 
   private onOffline(): void {
-    logger.warn(`[live-sdk] ${bi('网络断开，等待恢复', 'network offline, waiting to recover')}`)
+    logger.warn(`[live-sdk] ${t(MSG.NETWORK_OFFLINE)}`)
   }
 
   // ═══════════════ 内部：清晰度映射（§4.3） ═══════════════
@@ -1637,7 +1641,7 @@ export class Player {
       try {
         rp.report?.(record)
       } catch (err) {
-        logger.error(`[live-sdk] ${bi('reporter 异常', 'reporter threw')}`, err)
+        logger.error(`[live-sdk] ${t(MSG.REPORTER_THREW)}`, err)
       }
     }
   }
@@ -1647,7 +1651,7 @@ export class Player {
     const timeout = this.resolveTunable(this.config.network.loadTimeout)
     const timer = setTimeout(() => {
       if (this.stateMachine.current === 'loading') {
-        this.dispatchError(this.makeError(ERROR_CODE.LOAD_TIMEOUT, bi(`加载超时（${timeout}ms）`, `Load timed out (${timeout}ms)`), false))
+        this.dispatchError(this.makeError(ERROR_CODE.LOAD_TIMEOUT, t(MSG.LOAD_TIMEOUT, { ms: timeout }), false))
       }
     }, timeout)
     this.loadTimeoutTimer = timer

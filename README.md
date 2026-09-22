@@ -205,6 +205,7 @@ player.on('features_updated', (report) => {
 | `ignores` | `string[]` | — | 关闭 Preset 内指定功能插件 |
 | `network` | `Partial<NetworkConfig>` | 内置 | 网络敏感策略参数 |
 | `observability` | `'full' \| 'basic'` | `'full'` | 观测档位 |
+| `locale` | `'en' \| 'zh'` | `'en'` | 运行期消息语言（错误 / 日志 / 上报）；全局语义，**不含 UI 控件文案** |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | 宿主环境适配 |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | 封面图呈现方式；MSE 路径建议 `'overlay'` |
 
@@ -341,23 +342,39 @@ player.on('error', (e) => {
 >
 > SDK 侧有一道契约测试遍历全量 `ERROR_CODE`，未登记域即失败——所以你不会收到「本该有域却是 unknown」的错误码。
 
-#### 消息语言：`message` 为**中英双语**
+#### 消息编号与语言：`[LV-xxxx]` + `locale`
 
-`PlayerError.message`、`logger.*` 的控制台输出、上报记录里的 `message`、`getFeatureStatus()` 的
-`detail`、以及 `LiveStatusErrorPayload.error`，全部是 **`中文 / English`** 形式：
+运行期消息 = **稳定编号** + **按语言取的文案**。默认英文：
 
 ```text
-[live-sdk] 自动播放被拦截，等待用户手势 / autoplay blocked, waiting for a user gesture
-容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度… / container size is 0 (0×0); the player will show no picture. …
-媒体加载失败 / media failed to load
+[live-sdk] [LV-3006] reconnect attempt #1 (network_error) → https://cdn/a.m3u8
+[live-sdk] [LV-1004] autoplay blocked, waiting for a user gesture
+[LV-2001] media failed to load
+```
+
+传 `locale: 'zh'` 切中文 —— 同一条编号，文案换语言：
+
+```text
+[live-sdk] [LV-3006] 重连第 1 次 (network_error) → https://cdn/a.m3u8
+[LV-2001] 媒体加载失败
 ```
 
 | 说明 | 内容 |
 |---|---|
-| **为什么单字段拼接** | `message` 是给人看的字段；机器可读部分（`code` / `domain` / `Events.*` / `COMMAND_NAMES`）本来就是英文标识。双语同字段让 UI 原样展示、让 Sentry 原样记录，**接入方不需要改任何代码** |
-| **中文在前** | 先读到母语信息，英文作为补充 |
-| **⚠️ 不要按 `message` 做分支或匹配** | 请用 `err.code` 或 `err.domain` —— `message` 的文本会随版本调整（本次双语化就是一次调整） |
+| **编号是稳定标识** | `[LV-xxxx]` 形如 `LV-<分区><序号>`（分区见 `MSG` 常量）。**文案会变、编号不变** —— 用户报障可直接引用编号，告警规则也能锚编号，不必匹配易变文案 |
+| **⚠️ 不要按 `message` 文本做分支或匹配** | 请用 `err.code` / `err.domain`（机器可读部分恒为英文标识），或锚 `MSG` 编号 |
+| **`locale` 默认 `'en'`** | SDK 发布在公开 npm、README 为中英双语，日志与错误首先面向更广的读者；中文使用方一行配置切换 |
+| **`locale` 是全局语义**（同 `setLogLevel`） | 由 `createPlayer` 时写入，同一页面多实例**共用最后一次设置**。需要按实例区分语言时，消费与语言无关的 `code` / `domain` / `MSG` 编号 |
+| **覆盖面** | `PlayerError.message`、`logger.*` 与 `console.*` 的输出、上报记录的 `message`、`getFeatureStatus().detail`、`live_status_error.error`、平台提供的 `zeroSizeHint` |
 | **UI 控件文案不在此列** | 默认 UI 的按钮/选项文案仍是中文（属产品文案）；自绘 UI 完全不受影响 |
+
+```js
+const player = createPlayer({ container: '#player', locale: 'zh' }) // 中文日志与错误
+player.on('error', (e) => {
+  // 锚编号：换语言、换版本都不会断（锚文案会）
+  if (e.message.includes('[LV-3004]')) showRetryExhausted()
+})
+```
 
 ### 事件
 
@@ -904,6 +921,7 @@ player.on('features_updated', (report) => {
 | `ignores` | `string[]` | — | Disable specific feature plugins inside the Preset |
 | `network` | `Partial<NetworkConfig>` | built-in | Network-sensitive policy parameters |
 | `observability` | `'full' \| 'basic'` | `'full'` | Observability tier |
+| `locale` | `'en' \| 'zh'` | `'en'` | Language of runtime messages (errors / logs / reports); global semantics, **not** UI control labels |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | Host-environment adapter |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | How the poster is rendered; `'overlay'` recommended on the MSE path |
 
@@ -1034,23 +1052,39 @@ player.on('error', (e) => {
 >
 > A contract test walks the full `ERROR_CODE` set and fails if any code is unregistered — so you will never receive an error that should have a domain but reports `unknown`.
 
-#### Message language: `message` is **bilingual (Chinese / English)**
+#### Message IDs and language: `[LV-xxxx]` + `locale`
 
-`PlayerError.message`, `logger.*` console output, the `message` inside report records, `getFeatureStatus()`'s
-`detail`, and `LiveStatusErrorPayload.error` are all of the form **`中文 / English`**:
+A runtime message = **stable ID** + **text resolved by language**. English by default:
 
 ```text
-[live-sdk] 自动播放被拦截，等待用户手势 / autoplay blocked, waiting for a user gesture
-容器尺寸为 0（0×0），播放器不会有可见画面。请给容器或其父级确定的高度… / container size is 0 (0×0); the player will show no picture. …
-媒体加载失败 / media failed to load
+[live-sdk] [LV-3006] reconnect attempt #1 (network_error) → https://cdn/a.m3u8
+[live-sdk] [LV-1004] autoplay blocked, waiting for a user gesture
+[LV-2001] media failed to load
+```
+
+Pass `locale: 'zh'` to switch to Chinese — same ID, different text:
+
+```text
+[live-sdk] [LV-3006] 重连第 1 次 (network_error) → https://cdn/a.m3u8
+[LV-2001] 媒体加载失败
 ```
 
 | Note | Detail |
 |---|---|
-| **Why one concatenated field** | `message` is the human-readable field; the machine-readable parts (`code` / `domain` / `Events.*` / `COMMAND_NAMES`) are already English identifiers. Putting both languages in the same field means your UI and your Sentry integration keep working **without any code change** |
-| **Chinese first** | Read your native language first, English as a supplement |
-| **⚠️ Never branch on or match `message`** | Use `err.code` or `err.domain` — the text of `message` changes between versions (this bilingual change is one such adjustment) |
-| **UI control labels are excluded** | The default UI's button/option labels remain Chinese (they are product copy); custom UIs are unaffected |
+| **The ID is the stable part** | `[LV-xxxx]` is `LV-<section><number>` (sections documented on the `MSG` constant). **Text changes, IDs do not** — users can quote the ID in a bug report, and your alerting rules can key on it instead of on volatile text |
+| **⚠️ Never branch on or match `message` text** | Use `err.code` / `err.domain` (machine-readable parts are always English), or key on the `MSG` ID |
+| **`locale` defaults to `'en'`** | The SDK ships on public npm with a bilingual README, so logs and errors address the wider audience first; Chinese users switch with a single config line |
+| **`locale` is global** (like `setLogLevel`) | Written at `createPlayer` time; multiple instances on one page **share the last setting**. For per-instance language, consume the language-independent `code` / `domain` / `MSG` IDs |
+| **Coverage** | `PlayerError.message`, all `logger.*` / `console.*` output, `message` in report records, `getFeatureStatus().detail`, `live_status_error.error`, platform-provided `zeroSizeHint` |
+| **UI control labels are excluded** | The default UI's button/option labels remain Chinese (product copy); custom UIs are unaffected |
+
+```js
+const player = createPlayer({ container: '#player', locale: 'zh' })
+player.on('error', (e) => {
+  // Key on the ID: it survives language and version changes (matching text does not)
+  if (e.message.includes('[LV-3004]')) showRetryExhausted()
+})
+```
 
 ### Events
 
