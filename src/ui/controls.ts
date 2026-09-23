@@ -118,6 +118,21 @@ export class VolumeControl extends UIPlugin {
   }
 }
 
+/**
+ * 建一个 `<option>`：**DOM API 而非 HTML 字符串**。
+ *
+ * `q.label` 是业务可控字符串（业务常从接口取档位名，再经 `PlayConfig.quality` 传进来），
+ * 用 `innerHTML = \`<option>${label}</option>\`` 拼接就是一个注入点 ——
+ * 形如 `<img src=x onerror=…>` 的标签名会被解析执行。
+ * `textContent` / `value` 属性赋值都**不解析标记**，从根上消除该风险。
+ */
+function makeOption(value: string, label: string): HTMLOptionElement {
+  const opt = document.createElement('option')
+  opt.value = value
+  opt.textContent = label
+  return opt
+}
+
 /** 清晰度面板（下拉选择；无档位时隐藏） */
 export class QualityPanel extends UIPlugin {
   private select!: HTMLSelectElement
@@ -132,9 +147,12 @@ export class QualityPanel extends UIPlugin {
       }
       this.select.style.display = ''
       const current = s.currentQuality
-      this.select.innerHTML =
-        `<option value="-1">${uiText(MSG.UI_QUALITY_AUTO)}</option>` +
-        s.qualities.map((q) => `<option value="${q.id}">${q.label ?? q.id}</option>`).join('')
+      // ⚠️ **不要改回 `innerHTML` 字符串拼接** —— 见 `makeOption` 的注释：
+      // `q.label` 业务可控，拼进 HTML 等于开一个注入点。
+      this.select.replaceChildren(
+        makeOption('-1', uiText(MSG.UI_QUALITY_AUTO)),
+        ...s.qualities.map((q) => makeOption(String(q.id), q.label ?? String(q.id))),
+      )
       this.select.value = String(current ?? -1)
     })
     // `switchQuality` 返回 Promise（内部 await before 钩子），语句式触发即可 —— 失败会走 ERROR 通道

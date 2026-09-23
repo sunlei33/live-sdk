@@ -906,8 +906,11 @@
   8. `locale` 的全局语义**同样适用于 UI**：多实例各挂一套控件时，两边文案都跟随最后一次 `locale`。
      需要按实例区分语言时，消费与语言无关的 `code` / `domain` / `MSG`。
   9. 自绘 UI **不受影响**：内置控件的文案**不构成契约**，自绘 UI 自行决定文案与语言策略。
+  10. **档位名按文本插入，不被当作 HTML 解析**：`PlayConfig.quality[].label` 常来自业务接口，
+      内置清晰度面板用 `textContent` / `value` 属性赋值（`ui/controls.ts#makeOption`）而非
+      `innerHTML` 字符串拼接 —— 传 `<img src=x onerror=…>` 只会原样显示为文本，不会被执行。
 - **验收方式**：单测（`test/ui-i18n.test.ts`：按钮 `title` / `aria-label`、动作式文案、滑块只给
-  `aria-label`、下拉首项本地化、**无编号**、运行中切语言立即重绘、unmount 后不再触碰；
+  `aria-label`、下拉首项本地化、**无编号**、运行中切语言立即重绘、unmount 后不再触碰、**档位名的注入回归**；
   `test/i18n.test.ts`：`uiText` 与 `t` 的唯一差别是编号前缀）+ E2E（真实浏览器里挂载默认 UI，
   覆盖 `mountDefaultUI` 链路）。
 

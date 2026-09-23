@@ -170,7 +170,10 @@ describe('UI 控件文案：继承 locale、取自同一张文案表', () => {
 
     await p.play({ url: 'https://cdn/a.m3u8', quality: [{ id: 1, height: 720 }] } as never)
     expect(el.style.display).toBe('')
-    expect(el.innerHTML).toContain('<option value="-1">自动</option>')
+    // 选项经 DOM API 构造（不再是 innerHTML 拼接）→ 断言取 children
+    const options = el.children as Array<{ value: string; textContent: string }>
+    expect(options.map((o) => o.textContent)).toEqual(['自动', '1']) // label 缺省时回落 id
+    expect(options[0].value).toBe('-1')
     inst.unmount()
     p.destroy()
   })
@@ -201,5 +204,33 @@ describe('UI 控件文案：继承 locale、取自同一张文案表', () => {
     expect(uiText(MSG.UI_FULLSCREEN_ENTER)).toBe('Fullscreen')
     expect(uiText(MSG.UI_QUALITY_AUTO)).toBe('Auto')
     expect(uiText(MSG.UI_VOLUME)).toBe('Volume')
+  })
+
+  it('清晰度标签来自业务字符串时**按文本插入**，不被当作 HTML 解析（XSS 回归）', async () => {
+    const levels = [
+      { index: 0, height: 720, bitrate: 2000 },
+      { index: 1, height: 1080, bitrate: 5000 },
+    ]
+    const payload = '<img src=x onerror=alert(1)>'
+    const p = createPlayer({}, levels)
+    const { inst, el } = mountOne(C.QualityPanel, p, 'select')
+
+    await p.play({
+      url: 'https://cdn/a.m3u8',
+      quality: [
+        { id: 1, height: 720 },
+        { id: 2, height: 1080, label: payload },
+      ],
+    } as never)
+
+    const options = el.children as Array<{ value: string; textContent: string }>
+    expect(options).toHaveLength(3) // 「自动」+ 两档
+    expect(options[2].textContent).toBe(payload) // 原样作为**文本**
+    expect(options[2].value).toBe('2')
+
+    // 反证：若走 `innerHTML` 字符串拼接，替身不会解析 HTML、`children` 会是**空的**，
+    // 于是上面三条断言全挂。「children 数量正确」本身就锁住了「走 DOM API」这一实现。
+    inst.unmount()
+    p.destroy()
   })
 })

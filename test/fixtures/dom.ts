@@ -45,6 +45,8 @@ export interface FakeMediaElement {
   removeAttribute(k: string): void
   getAttribute(k: string): string | undefined
   appendChild(c: unknown): unknown
+  /** 真实 DOM 的 `Element.replaceChildren`：清空后追加（清晰度面板用它避免 HTML 字符串拼接） */
+  replaceChildren(...nodes: unknown[]): void
   remove(): void
   load(): void
   play(): Promise<void>
@@ -90,6 +92,10 @@ export function makeEl(tag: string): FakeMediaElement {
       el.children.push(c)
       return c
     },
+    replaceChildren(...nodes) {
+      el.children.length = 0
+      el.children.push(...nodes)
+    },
     remove() {},
     load() {},
     play() {
@@ -121,6 +127,12 @@ export function makeEl(tag: string): FakeMediaElement {
  * 安装最小 DOM 环境到 globalThis（window / document / navigator）。
  * 返回 `reset()` 以便测试间清理，以及 `doc`（可派发 document 事件，如 fullscreenchange）。
  */
+/**
+ * 在替身里**保持单例**的 tag（见 `createElement` 注释）。
+ * 只有 `<video>`：SDK 内部创建它，而测试要在 `beforeEach` 里提前持引用。
+ */
+const SINGLETON_TAGS = new Set(['video'])
+
 export function installDom(): { els: Record<string, FakeMediaElement>; doc: FakeDocument; reset: () => void } {
   const els: Record<string, FakeMediaElement> = {}
   const container = makeEl('div')
@@ -144,7 +156,16 @@ export function installDom(): { els: Record<string, FakeMediaElement>; doc: Fake
     visibilityState: 'visible',
     // 全屏元素：测试可写，用于驱动 PlayerState.fullscreen 同步
     fullscreenElement: null,
-    createElement: (tag: string) => (els[tag] ||= makeEl(tag)),
+    // `<video>` 保持**单例**（见 SINGLETON_TAGS）；其余 tag 按真实语义**每次新建**。
+    // 早期版本对所有 tag 记忆化，导致「两个 `<button>` 控件」或「两个 `<option>`」
+    // 拿到同一对象、互相覆盖属性，断言失去意义。
+    // 未走单例分支时仍把最新实例记进 `els[tag]`，便于测试取（如 poster 图层的 `<img>`）。
+    createElement: (tag: string) => {
+      if (SINGLETON_TAGS.has(tag)) return (els[tag] ||= makeEl(tag))
+      const el = makeEl(tag)
+      els[tag] = el
+      return el
+    },
     querySelector: () => container,
     addEventListener(t, fn) {
       ;(docListeners[t] ||= []).push(fn)

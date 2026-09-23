@@ -27,6 +27,7 @@ function makeEl(tag) {
     setAttribute(k, v) { this.attributes[k] = v },
     removeAttribute(k) { delete this.attributes[k] },
     appendChild(c) { this.children.push(c); return c },
+    replaceChildren(...nodes) { this.children.length = 0; this.children.push(...nodes) },
     remove() {},
     load() {},
     play() { this.paused = false; return Promise.resolve() },
@@ -55,7 +56,14 @@ const docListeners = {}
 globalThis.document = {
   visibilityState: 'visible',
   fullscreenElement: null, // 测试可写，驱动 PlayerState.fullscreen 同步
-  createElement: (tag) => (els[tag] ||= makeEl(tag)),
+  // `<video>` 保持单例（SDK 内部创建、断言围绕它）；其余 tag 每次新建 ——
+  // 与 test/fixtures/dom.ts 同语义（两份替身是独立实现，改动要同步）。
+  createElement: (tag) => {
+    if (tag === 'video') return (els[tag] ||= makeEl(tag))
+    const el = makeEl(tag)
+    els[tag] = el
+    return el
+  },
   querySelector: () => container,
   addEventListener(t, fn) { (docListeners[t] ||= []).push(fn) },
   removeEventListener(t, fn) {
