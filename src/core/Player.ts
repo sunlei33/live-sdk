@@ -106,7 +106,14 @@ export class Player {
   private quality = new QualityController()
   private timers = new Set<number>()
   private destroyed = false
-  kernelReady = false
+  /**
+   * 内核是否已就绪（首帧闸门）。**保持 `private`** —— 判据只服务本文件。
+   *
+   * `PluginManager` 需要它时，由 `addPlugin` 判断后传下去（而不是让它自己去读）：
+   * TS 的 `private` 按类封装、兄弟类也算外部，跨类读取会迫使字段放宽成公开成员 ——
+   * 它曾因此进到 `dist` 的 `.d.ts`，接入方可写。现由 `verify/visibility.mjs` 兜底。
+   */
+  private kernelReady = false
   private hasLoaded = false // 是否成功起播过（无参 play() 恢复语义的判据）
   private mediaPaused = false // 媒体真实暂停态兜底标志（状态机未覆盖的迁移路径）
   /**
@@ -729,7 +736,21 @@ export class Player {
    * 两种形态都会走 `create(player)` → `init(config)`，业务不要自行预先 register。
    */
   registerPlugin(plugin: PluginInput, config?: unknown): Plugin {
-    return this.plugins.add(plugin, config)
+    return this.addPlugin(plugin, config)
+  }
+
+  /**
+   * 注册插件，且**内核已就绪时立即补调 `ready()`**（`registerPlugin` 与 `applyPreset` 共用）。
+   *
+   * 为什么不把这个判断放回 `PluginManager`：① 「此刻算不算就绪」是 `Player` 的知识，
+   * 它只该管插件集合与生命周期广播；② 更要紧的是，让 `PluginManager` 反向读
+   * `player.kernelReady` 会逼那个字段放弃 `private`（TS 按类封装，兄弟类算外部）——
+   * 它此前正是这样泄漏进 `.d.ts` 的。详见 `PluginManager` 的类注释。
+   */
+  private addPlugin(input: PluginInput, config?: unknown): Plugin {
+    const instance = this.plugins.add(input, config)
+    if (this.kernelReady) this.plugins.readyOne(instance)
+    return instance
   }
 
   unregisterPlugin(name: string): void {
@@ -745,8 +766,20 @@ export class Player {
     this.disposedSubs.push(fn)
   }
 
-  async runHooks(name: string, ctx: Record<string, unknown>): Promise<void> {
+  /**
+   * 跑一轮钩子。**内部方法**：`HookFn` 的返回值没有回传通道，决策经可变 `ctx` 传递
+   * （见 `hookBefore`）；对外只暴露 `useHooks` 注册，不需要接入方手动触发。
+   */
+  private async runHooks(name: string, ctx: Record<string, unknown>): Promise<void> {
     await this.hooks.run(name, ctx)
+  }
+
+  /**
+   * 构造命令钩子上下文。初始 `phase` 取 `'before'` —— 它总会被 `hookBefore` / `hookAfter`
+   * 覆盖，这里只是为了让类型完整（钩子真正执行时两个字段必定就位）。
+   */
+  private hookCtx(extra: Record<string, unknown> = {}): CommandHookContext {
+    return { phase: 'before', cancelled: false, ...extra }
   }
 
   /**
@@ -758,14 +791,6 @@ export class Player {
    *
    * 每次调用前重置 `cancelled` —— 防止上一次被拦截的残留值误伤本次调用。
    */
-  /**
-   * 构造命令钩子上下文。初始 `phase` 取 `'before'` —— 它总会被 `hookBefore` / `hookAfter`
-   * 覆盖，这里只是为了让类型完整（钩子真正执行时两个字段必定就位）。
-   */
-  private hookCtx(extra: Record<string, unknown> = {}): CommandHookContext {
-    return { phase: 'before', cancelled: false, ...extra }
-  }
-
   private async hookBefore(name: string, ctx: CommandHookContext): Promise<boolean> {
     ctx.phase = 'before'
     ctx.cancelled = false
@@ -1631,7 +1656,7 @@ export class Player {
     }
     for (const Ctor of list) {
       if (ignores.includes(Ctor.pluginName)) continue
-      this.plugins.add(Ctor as never)
+      this.addPlugin(Ctor as never)
     }
   }
 

@@ -287,6 +287,63 @@ describe('registerPlugin 兼容实例与构造器', () => {
   })
 })
 
+describe('插件 ready 的两种时序（内核就绪前 / 后注册）', () => {
+  /** 记录 `ready()` 调用时刻的替身；`throwOnReady` 用于验证异常隔离 */
+  const makeProbe = (name: string, calls: string[], throwOnReady = false) => ({
+    name,
+    create(): void {},
+    init(): void {},
+    ready(): void {
+      calls.push(name)
+      if (throwOnReady) throw new Error('ready boom')
+    },
+    destroy(): void {},
+  })
+
+  it('就绪**前**注册 → 首帧时由 `readyAll()` 广播', async () => {
+    const p = createPlayer()
+    const calls: string[] = []
+    p.registerPlugin(makeProbe('early', calls) as never)
+    expect(calls).toEqual([]) // 内核尚未创建 → 不该提前调
+
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    video._fire('loadeddata') // 首帧 → kernelReady = true + plugins.readyAll()
+    expect(calls).toEqual(['early'])
+    p.destroy()
+  })
+
+  it('就绪**后**注册 → `readyOne()` 立即补调（否则运行期动态注册的插件永远等不到）', async () => {
+    const p = createPlayer()
+    const calls: string[] = []
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    video._fire('loadeddata')
+    expect(calls).toEqual([])
+
+    p.registerPlugin(makeProbe('late', calls) as never)
+    expect(calls).toEqual(['late'])
+    p.destroy()
+  })
+
+  it('`ready()` 抛异常只记日志、不影响后续插件（补调路径与广播路径共用同一入口）', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const p = createPlayer()
+    const calls: string[] = []
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    video._fire('loadeddata')
+
+    p.registerPlugin(makeProbe('boom', calls, true) as never) // 抛
+    expect(calls).toEqual(['boom'])
+    p.registerPlugin(makeProbe('after', calls) as never) // 仍应正常补调
+    expect(calls).toEqual(['boom', 'after'])
+    // 异常被记录（编号可锚定），不是静默吞掉。
+    // 注意 logger 会先传 '[live-sdk]' 前缀，故要在**全部**参数里找编号。
+    expect(errSpy.mock.calls.some((args) => args.some((a) => String(a).includes('[LV-5004]')))).toBe(true)
+
+    errSpy.mockRestore()
+    p.destroy()
+  })
+})
+
 describe('setAppState 业务扩展位', () => {
   it('写入 app.* 并触发订阅回调', () => {
     const p = createPlayer()

@@ -697,7 +697,7 @@ E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重�
 > 清 `test-results/` 可降低概率但**不能根除**；`--workers=1` 与 CI 的 `workers: 1` + `retries: 2` 可规避。
 > 详见技术实现档案 §8.11。
 
-`npm run verify` 里还有五道**静态门**，专门拦「声明了、导出了，但其实没接线 / 没人用 / 没打进包 / 依赖越层」这类静态检查拦不住的失效：
+`npm run verify` 里还有六道**静态门**，专门拦「声明了、导出了，但其实没接线 / 没人用 / 没打进包 / 依赖越层」这类静态检查拦不住的失效：
 
 | 门 | 拦什么 | 加它的原因 |
 |---|---|---|
@@ -706,6 +706,7 @@ E2E 覆盖「内核 → Player → UI」的跨层联动（断流重连与去重�
 | `verify/exports.mjs` 公开面形状 | 顶层导出 / 枚举与常量内容与清单**精确集合比对**，缺失与多余都失败 | 原实现只问「名字在不在」，于是**成员级的删除/改名完全不被拦住** |
 | `verify/surface.mjs` 公开面活性 | 清单里每个公开名在 `src/` 必须有消费者，或有测试覆盖；两者皆无须登记豁免并写理由 | `sniffer` 曾有 5 个函数零引用零测试、占该文件 51%，一路活到 0.6.0 才被人工发现（随 0.6.0 删除） |
 | `verify/artifacts.mjs` 产物卫生 | `dist/**/*.d.ts` 必须能对应到 `src/**/*.ts`；`package.json` 的 `exports` 目标必须存在；`dist/*.es.js` 必须都被 `exports` 引用 | 构建链**不清理 `dist`**，删掉/改名的源文件会留下孤儿声明，而 `npm pack` 打的正是磁盘上的 `dist` |
+| `verify/visibility.mjs` 成员可见性 | `Player` 的公开实例**属性**只允许白名单里的 `root` / `media`（且必须 `readonly`）；公开**方法**必须登记在 `public-surface.mjs#PLAYER_PUBLIC` 里；白名单自身也不许腐烂（登记了却已不存在的名字同样失败） | `kernelReady = false` 与 `runHooks()` **两处都漏了 `private`** —— 根因是它们被兄弟类跨类读取，而 TS 的 `private` 是**按类**封装的（兄弟类也算外部），标了编译不过，于是被放宽成公开成员、写进了 `dist/*.d.ts`（`kernelReady` 还因此成了**接入方可写**的字段）。其余八道门都只看模块导出，**没有一道看得到类成员的可见性** |
 
 > `events` / `exports` / `surface` 三者的**盲区各不相同**，也正因此才会三个都要：
 > `events` 只管事件有没有派发点、不看导出；`exports` 只管导出名字对不对、不看有没有人用；
@@ -1406,7 +1407,7 @@ E2E covers the cross-layer chain "kernel → Player → UI" (reconnection and de
 
 `npm run verify` also runs an **events liveness census** (`verify/events.mjs`): it counts the actual `emit` sites for every `Events` enum member across `src/`, and **fails the build on zero dispatch sites**. It exists because silent failures of the form "declared, exported, `on()` succeeds, but never fires" slip past type checks, smoke tests, E2E and unit tests alike (see the implementation dossier §9).
 
-Four more static gates guard adjacent blind spots:
+Five more static gates guard adjacent blind spots:
 
 | Gate | What it blocks | Why it exists |
 |---|---|---|
@@ -1414,6 +1415,7 @@ Four more static gates guard adjacent blind spots:
 | `verify/exports.mjs` public-surface shape | exact set comparison of top-level exports / enum members / constant contents against the manifest — both **missing and extra** names fail | the previous version only asked "is the name present", so member-level deletions and renames were never caught |
 | `verify/surface.mjs` public-surface liveness | every name in the manifest must have a consumer in `src/` or test coverage; otherwise it must be registered in an exemption list with a written reason | `sniffer` had 5 zero-reference, zero-test functions (51% of the file) that survived until 0.6.0 |
 | `verify/artifacts.mjs` artifact hygiene | every `dist/**/*.d.ts` must map to a `src/**/*.ts`; every `package.json` `exports` target must exist; every `dist/*.es.js` must be referenced by `exports` | nothing in the build pipeline cleans `dist`, so deleted/renamed sources leave orphan declarations — and `npm pack` packs exactly what is on disk |
+| `verify/visibility.mjs` member visibility | `Player`'s public instance **fields** may only be the whitelisted `root` / `media` (both must be `readonly`); public **methods** must be registered in `public-surface.mjs#PLAYER_PUBLIC`; the whitelist itself may not rot (a registered name that no longer exists also fails) | **two members were missing `private`**: `kernelReady = false` and `runHooks()`. Root cause: a sibling class read them, and TS's `private` is per-class (a sibling counts as outside), so marking them failed to compile and they were widened into public members, ending up in `dist/*.d.ts` (`kernelReady` was even **writable by implementers**). Every other gate only looks at module exports — **none of them can see class-member visibility** |
 
 > `exports` and `surface` are **a pair**: the shape gate forces new exports into the manifest (`verify/public-surface.mjs`), and the liveness gate then audits each entry. Either one alone has a blind spot — with the shape gate only, those 5 dead functions were green for years; with the liveness gate only, newly added but unregistered exports are skipped entirely.
 
