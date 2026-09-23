@@ -205,7 +205,7 @@ player.on('features_updated', (report) => {
 | `ignores` | `string[]` | — | 关闭 Preset 内指定功能插件 |
 | `network` | `Partial<NetworkConfig>` | 内置 | 网络敏感策略参数 |
 | `observability` | `'full' \| 'basic'` | `'full'` | 观测档位 |
-| `locale` | `'en' \| 'zh'` | `'en'` | 运行期消息语言（错误 / 日志 / 上报）；全局语义，**不含 UI 控件文案** |
+| `locale` | `'en' \| 'zh'` | `'en'` | 运行期消息语言（错误 / 日志 / 上报 / **内置 UI 控件文案**）；全局语义 |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | 宿主环境适配 |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | 封面图呈现方式；MSE 路径建议 `'overlay'` |
 
@@ -344,7 +344,7 @@ player.on('error', (e) => {
 
 #### 消息编号与语言：`[LV-xxxx]` + `locale`
 
-运行期消息 = **稳定编号** + **按语言取的文案**。默认英文：
+运行期消息（**含内置 UI 控件文案**）= **稳定编号** + **按语言取的文案**。默认英文：
 
 ```text
 [live-sdk] [LV-3006] reconnect attempt #1 (network_error) → https://cdn/a.m3u8
@@ -352,11 +352,12 @@ player.on('error', (e) => {
 [LV-2001] media failed to load
 ```
 
-传 `locale: 'zh'` 切中文 —— 同一条编号，文案换语言：
+传 `locale: 'zh'` 切中文 —— 同一条编号，文案换语言，**界面上的 tooltip 也一起变**：
 
 ```text
 [live-sdk] [LV-3006] 重连第 1 次 (network_error) → https://cdn/a.m3u8
-[LV-2001] 媒体加载失败
+[live-sdk] [LV-2001] 媒体加载失败
+全屏按钮 tooltip →「全屏」（UI 文案不带编号，见下）
 ```
 
 | 说明 | 内容 |
@@ -364,12 +365,14 @@ player.on('error', (e) => {
 | **编号是稳定标识** | `[LV-xxxx]` 形如 `LV-<分区><序号>`（分区见 `MSG` 常量）。**文案会变、编号不变** —— 用户报障可直接引用编号，告警规则也能锚编号，不必匹配易变文案 |
 | **⚠️ 不要按 `message` 文本做分支或匹配** | 请用 `err.code` / `err.domain`（机器可读部分恒为英文标识），或锚 `MSG` 编号 |
 | **`locale` 默认 `'en'`** | SDK 发布在公开 npm、README 为中英双语，日志与错误首先面向更广的读者；中文使用方一行配置切换 |
-| **`locale` 是全局语义**（同 `setLogLevel`） | 由 `createPlayer` 时写入，同一页面多实例**共用最后一次设置**。需要按实例区分语言时，消费与语言无关的 `code` / `domain` / `MSG` 编号 |
-| **覆盖面** | `PlayerError.message`、`logger.*` 与 `console.*` 的输出、上报记录的 `message`、`getFeatureStatus().detail`、`live_status_error.error`、平台提供的 `zeroSizeHint` |
-| **UI 控件文案不在此列** | 默认 UI 的按钮/选项文案仍是中文（属产品文案）；自绘 UI 完全不受影响 |
+| **`locale` 是全局语义**（同 `setLogLevel`） | 由 `createPlayer` 时写入，同一页面多实例**共用最后一次设置**（**UI 控件也在这个语义内**）。需要按实例区分语言时，消费与语言无关的 `code` / `domain` / `MSG` 编号 |
+| **覆盖面** | `PlayerError.message`、`logger.*` 与 `console.*` 的输出、上报记录的 `message`、`getFeatureStatus().detail`、`live_status_error.error`、平台提供的 `zeroSizeHint`，以及**内置 UI 控件的 `title` / `aria-label` / 清晰度下拉项**（分区 `LV-7xxx`） |
+| **UI 文案继承同一个 `locale`，但不带编号** | 编号是给开发引用、给告警锚定的，出现在 tooltip 里只是噪声（读屏还会把编号逐字念出来）。所以 UI 走 `uiText()`（纯文案）、日志走 `t()`（带编号）—— **同一张文案表、同一个 locale，只差一个编号前缀** |
+| **运行中切语言会立即重绘已挂载的 UI** | `setLocale()` 会通知订阅者，控件用最近状态快照重绘；否则会出现「语言变了、tooltip 没变」——`player.subscribe` 只在**状态变化**时触发，而切语言不改状态 |
+| **自绘 UI 不受影响** | 内置控件的文案不构成契约，自绘 UI 自己决定文案与语言策略 |
 
 ```js
-const player = createPlayer({ container: '#player', locale: 'zh' }) // 中文日志与错误
+const player = createPlayer({ container: '#player', locale: 'zh' }) // 中文日志、错误与内置控件 tooltip
 player.on('error', (e) => {
   // 锚编号：换语言、换版本都不会断（锚文案会）
   if (e.message.includes('[LV-3004]')) showRetryExhausted()
@@ -921,7 +924,7 @@ player.on('features_updated', (report) => {
 | `ignores` | `string[]` | — | Disable specific feature plugins inside the Preset |
 | `network` | `Partial<NetworkConfig>` | built-in | Network-sensitive policy parameters |
 | `observability` | `'full' \| 'basic'` | `'full'` | Observability tier |
-| `locale` | `'en' \| 'zh'` | `'en'` | Language of runtime messages (errors / logs / reports); global semantics, **not** UI control labels |
+| `locale` | `'en' \| 'zh'` | `'en'` | Language of runtime messages (errors / logs / reports / **built-in UI control text**); global semantics |
 | `env` | `EnvAdapter` | `WebEnvAdapter` | Host-environment adapter |
 | `posterMode` | `'native' \| 'overlay'` | `'native'` | How the poster is rendered; `'overlay'` recommended on the MSE path |
 
@@ -1054,7 +1057,7 @@ player.on('error', (e) => {
 
 #### Message IDs and language: `[LV-xxxx]` + `locale`
 
-A runtime message = **stable ID** + **text resolved by language**. English by default:
+A runtime message (**including built-in UI control text**) = **stable ID** + **text resolved by language**. English by default:
 
 ```text
 [live-sdk] [LV-3006] reconnect attempt #1 (network_error) → https://cdn/a.m3u8
@@ -1062,7 +1065,7 @@ A runtime message = **stable ID** + **text resolved by language**. English by de
 [LV-2001] media failed to load
 ```
 
-Pass `locale: 'zh'` to switch to Chinese — same ID, different text:
+Pass `locale: 'zh'` to switch to Chinese — same ID, different text, and **the on-screen tooltips switch with it**:
 
 ```text
 [live-sdk] [LV-3006] 重连第 1 次 (network_error) → https://cdn/a.m3u8
@@ -1074,9 +1077,11 @@ Pass `locale: 'zh'` to switch to Chinese — same ID, different text:
 | **The ID is the stable part** | `[LV-xxxx]` is `LV-<section><number>` (sections documented on the `MSG` constant). **Text changes, IDs do not** — users can quote the ID in a bug report, and your alerting rules can key on it instead of on volatile text |
 | **⚠️ Never branch on or match `message` text** | Use `err.code` / `err.domain` (machine-readable parts are always English), or key on the `MSG` ID |
 | **`locale` defaults to `'en'`** | The SDK ships on public npm with a bilingual README, so logs and errors address the wider audience first; Chinese users switch with a single config line |
-| **`locale` is global** (like `setLogLevel`) | Written at `createPlayer` time; multiple instances on one page **share the last setting**. For per-instance language, consume the language-independent `code` / `domain` / `MSG` IDs |
-| **Coverage** | `PlayerError.message`, all `logger.*` / `console.*` output, `message` in report records, `getFeatureStatus().detail`, `live_status_error.error`, platform-provided `zeroSizeHint` |
-| **UI control labels are excluded** | The default UI's button/option labels remain Chinese (product copy); custom UIs are unaffected |
+| **`locale` is global** (like `setLogLevel`) | Written at `createPlayer` time; multiple instances on one page **share the last setting** (**UI controls are covered by the same rule**). For per-instance language, consume the language-independent `code` / `domain` / `MSG` IDs |
+| **Coverage** | `PlayerError.message`, all `logger.*` / `console.*` output, `message` in report records, `getFeatureStatus().detail`, `live_status_error.error`, platform-provided `zeroSizeHint`, and **built-in UI control text** (`title` / `aria-label` / quality dropdown items, section `LV-7xxx`) |
+| **UI text inherits the same `locale` but carries no ID** | IDs exist for developers to quote and for alerts to key on — inside a tooltip they are just noise (screen readers would spell them out). So UI goes through `uiText()` (plain text) and logs through `t()` (`[LV-xxxx]` prefixed): **one message table, one locale, the only difference being the ID prefix** |
+| **Switching language at runtime repaints mounted UI immediately** | `setLocale()` notifies subscribers and controls repaint from their last state snapshot; otherwise you get "language changed but the tooltip did not" — `player.subscribe` only fires on **state changes**, and switching language is not one |
+| **Custom UIs are unaffected** | The built-in controls' text is not a contract; a custom UI decides its own copy and language strategy |
 
 ```js
 const player = createPlayer({ container: '#player', locale: 'zh' })
@@ -1084,6 +1089,7 @@ player.on('error', (e) => {
   // Key on the ID: it survives language and version changes (matching text does not)
   if (e.message.includes('[LV-3004]')) showRetryExhausted()
 })
+fullscreen button tooltip → 「全屏」 (UI text carries no ID, see below)
 ```
 
 ### Events

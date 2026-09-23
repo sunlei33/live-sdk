@@ -95,10 +95,15 @@ export type ErrorDomain = (typeof ERROR_DOMAIN)[keyof typeof ERROR_DOMAIN]
  * | `LV-4xxx` | 配置与接入（地址缺失 / 容器尺寸 / 配置解析） |
  * | `LV-5xxx` | 插件（注册与生命周期 / LivePolling） |
  * | `LV-6xxx` | 能力对齐与档位 |
+ * | `LV-7xxx` | UI 控件文案（tooltip / `aria-label` / 下拉项；**取用时不带编号**） |
  * | `LV-9xxx` | 兜底与内部不变量 |
  *
  * ⚠️ **编号一经发布不再改动、也不复用**（复用会让历史日志指向另一条消息）。
  * 文案表（编号 → 中英文）在 `utils/messages.ts`。
+ *
+ * ⚠️ `LV-7xxx`（UI 控件）与其余分区的**取用方式不同**：UI 文案面向**终端用户**，
+ * 编号是噪声 —— 用 `uiText()` 取纯文案；其余消息面向**开发与排查**，用 `t()` 取，
+ * 返回值自带 `[LV-xxxx]` 前缀（见 `utils/i18n.ts`）。
  */
 export const MSG = {
   // —— LV-1xxx 命令与交互 ——
@@ -185,9 +190,29 @@ export const MSG = {
   /** 原生回退路径说明（`FeatureStatus.detail`） */
   FEATURE_NATIVE_FALLBACK: 'LV-6005',
 
+  // —— LV-7xxx UI 控件文案（**取用时不带编号前缀**，见 `utils/i18n.ts#uiText`）——
+  /** 清晰度「自动」档（UI 下拉项） */
+  UI_QUALITY_AUTO: 'LV-7001',
+  /** 全屏按钮：进入全屏（`title` 与 `aria-label`） */
+  UI_FULLSCREEN_ENTER: 'LV-7002',
+  /** 全屏按钮：退出全屏（`title` 与 `aria-label`） */
+  UI_FULLSCREEN_EXIT: 'LV-7003',
+  /** 播放按钮的可访问名（图标按钮读屏时用） */
+  UI_PLAY: 'LV-7004',
+  /** 暂停按钮的可访问名 */
+  UI_PAUSE: 'LV-7005',
+  /** 静音按钮的可访问名 */
+  UI_MUTE: 'LV-7006',
+  /** 取消静音按钮的可访问名 */
+  UI_UNMUTE: 'LV-7007',
+  /** 音量滑块的可访问名 */
+  UI_VOLUME: 'LV-7008',
+
   // —— LV-9xxx 兜底与内部不变量 ——
   /** 事件处理器抛异常（`console.error`） */
   EVENT_HANDLER_THREW: 'LV-9001',
+  /** 语言变更监听器抛异常（`console.error`） */
+  LOCALE_LISTENER_THREW: 'LV-9002',
 } as const
 
 export type MsgId = (typeof MSG)[keyof typeof MSG]

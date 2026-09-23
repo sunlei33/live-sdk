@@ -4,13 +4,20 @@ import type { MsgId } from '../constants'
  * 运行期消息文案表：编号 → `{ en, zh }`。
  *
  * **单一事实源**：所有面向人的消息（错误 / 日志 / 上报 / `FeatureStatus.detail` /
- * `zeroSizeHint` / 接入方可见的 `throw`）都从这里取文案，模块里**不再出现裸字符串**。
+ * `zeroSizeHint` / 接入方可见的 `throw`）**以及 UI 控件文案**都从这里取，
+ * 模块里**不再出现裸字符串**（含 `ui/` —— UI 文案同样走这张表，不再硬编码）。
  * 这样加一条消息只需两步：① 在 `constants.ts#MSG` 登记编号；② 在这里补中英文。
  *
  * **类型即完整性校验**：`Record<MsgId, …>` 是穷尽映射 —— 登记了编号却忘了补文案，
  * TypeScript 直接编译失败（比「运行时才发现某条消息是 undefined」早得多）。
  *
- * **占位符**：用 `{name}`，由 `utils/i18n.ts#t(id, params)` 插值。
+ * **两个取用入口**（都在 `utils/i18n.ts`，按受众区分）：
+ * - `t(id, params)` → `[LV-xxxx] 文案`：面向**开发与排查**（错误 / 日志 / 上报）。
+ * - `uiText(id, params)` → `文案`：面向**终端用户**（UI tooltip / `aria-label` / 下拉项），
+ *   不带编号 —— 编号是给开发引用的，出现在 tooltip 里只是噪声。
+ * 两者共用同一份文案表与同一个 locale，唯一差别是有无编号前缀。
+ *
+ * **占位符**：用 `{name}`，由 `utils/i18n.ts` 插值。
  * 未提供对应参数时占位符**原样保留**（`{name}`），便于一眼看出漏传。
  *
  * ⚠️ **编号与文案是两件事**：文案随 `PlayerConfig.locale` 与版本变化，编号恒定。
@@ -173,9 +180,49 @@ export const MESSAGES: Record<MsgId, { en: string; zh: string }> = {
     zh: '原生回退路径，投屏由系统接管',
   },
 
+  // —— LV-7xxx UI 控件文案（**取用时不带编号前缀**，见 `utils/i18n.ts#uiText`）——
+  // 面向终端用户：出现在 tooltip（`title`）、无障碍名（`aria-label`）与下拉项上，
+  // 因此文案要**短**、**首字母大写**（英文），且不带 `[LV-xxxx]` 编号 —— 编号给开发看，不给用户看。
+  'LV-7001': {
+    en: 'Auto',
+    zh: '自动',
+  },
+  'LV-7002': {
+    en: 'Fullscreen',
+    zh: '全屏',
+  },
+  'LV-7003': {
+    en: 'Exit fullscreen',
+    zh: '退出全屏',
+  },
+  'LV-7004': {
+    en: 'Play',
+    zh: '播放',
+  },
+  'LV-7005': {
+    en: 'Pause',
+    zh: '暂停',
+  },
+  'LV-7006': {
+    en: 'Mute',
+    zh: '静音',
+  },
+  'LV-7007': {
+    en: 'Unmute',
+    zh: '取消静音',
+  },
+  'LV-7008': {
+    en: 'Volume',
+    zh: '音量',
+  },
+
   // —— LV-9xxx 兜底与内部不变量 ——
   'LV-9001': {
     en: 'event handler error: {event}',
     zh: '事件处理器异常：{event}',
+  },
+  'LV-9002': {
+    en: 'locale change listener threw: {detail}',
+    zh: '语言变更监听器异常：{detail}',
   },
 }

@@ -1,5 +1,19 @@
 import type { Player } from '../core/Player'
+import { MSG } from '../constants'
+import { uiText } from '../utils/i18n'
 import { UIPlugin, bindPress } from './UIPlugin'
+
+/**
+ * 内置控件的文案统一走 `uiText()`（继承 `PlayerConfig.locale`，**不带 `[LV-xxxx]` 编号**）。
+ *
+ * 三点约定：
+ * 1. **动作式文案**：按钮提示写「点了会怎样」（全屏态下是 `退出全屏`、静音态下是 `取消静音`），
+ *    而不是描述当前状态 —— 与图标语义一致，用户不必反推。
+ * 2. **图标按钮必须有可访问名**：`⏸` / `🔊` 这类字符对读屏软件没有语义（读出来是空白或符号名），
+ *    所以每个按钮都补 `title` + `aria-label`（两者同文案：前者是悬停提示，后者是读屏名）。
+ * 3. **状态与文案同一处渲染**：`bindState()` 在 mount 时立即画一次、状态变化时重绘、
+ *    语言变更时用最近快照重绘，三者的渲染逻辑是同一段代码，不会各写一份而漂移。
+ */
 
 /** 播放/暂停按钮 */
 export class PlayButton extends UIPlugin {
@@ -8,8 +22,11 @@ export class PlayButton extends UIPlugin {
     this.btn = document.createElement('button')
     this.btn.className = 'live-sdk-btn'
     root.appendChild(this.btn)
-    this.unsub = player.subscribe((s) => {
+    this.bindState(player, (s) => {
       this.btn.textContent = s.playing ? '⏸' : '▶'
+      const label = uiText(s.playing ? MSG.UI_PAUSE : MSG.UI_PLAY)
+      this.btn.title = label
+      this.btn.setAttribute('aria-label', label)
     })
     // Pointer Events 单一事件源（见 bindPress 注释：规避 click+touch 双触发、触摸大屏无响应）
     this.track(
@@ -38,8 +55,11 @@ export class MuteButton extends UIPlugin {
     this.btn = document.createElement('button')
     this.btn.className = 'live-sdk-btn'
     root.appendChild(this.btn)
-    this.unsub = player.subscribe((s) => {
+    this.bindState(player, (s) => {
       this.btn.textContent = s.muted ? '🔇' : '🔊'
+      const label = uiText(s.muted ? MSG.UI_UNMUTE : MSG.UI_MUTE)
+      this.btn.title = label
+      this.btn.setAttribute('aria-label', label)
     })
     this.track(
       bindPress(this.btn, () => {
@@ -73,9 +93,11 @@ export class VolumeControl extends UIPlugin {
     })
     root.appendChild(this.slider)
 
-    this.unsub = player.subscribe((s) => {
+    this.bindState(player, (s) => {
       // 静音时滑块归零，但记住原音量供恢复
       this.slider.value = String(s.muted ? 0 : s.volume)
+      // 只给 `aria-label`，不给 `title`：滑块每拖一下都弹 tooltip 是噪声
+      this.slider.setAttribute('aria-label', uiText(MSG.UI_VOLUME))
     })
 
     // range 控件的 input 事件在鼠标/触摸/Pointer 下均会触发，无需自行绑定指针事件，
@@ -103,16 +125,16 @@ export class QualityPanel extends UIPlugin {
     this.select = document.createElement('select')
     this.select.className = 'live-sdk-select'
     root.appendChild(this.select)
-    this.unsub = player.subscribe((s) => {
+    this.bindState(player, (s) => {
       if (!s.capabilities.qualitySwitch || s.qualities.length === 0) {
         this.select.style.display = 'none'
         return
       }
       this.select.style.display = ''
       const current = s.currentQuality
-      this.select.innerHTML = `<option value="-1">自动</option>` + s.qualities
-        .map((q) => `<option value="${q.id}">${q.label ?? q.id}</option>`)
-        .join('')
+      this.select.innerHTML =
+        `<option value="-1">${uiText(MSG.UI_QUALITY_AUTO)}</option>` +
+        s.qualities.map((q) => `<option value="${q.id}">${q.label ?? q.id}</option>`).join('')
       this.select.value = String(current ?? -1)
     })
     // `switchQuality` 返回 Promise（内部 await before 钩子），语句式触发即可 —— 失败会走 ERROR 通道
@@ -133,14 +155,13 @@ export class FullscreenButton extends UIPlugin {
   mount(root: HTMLElement, player: Player): void {
     this.btn = document.createElement('button')
     this.btn.className = 'live-sdk-btn'
-    this.btn.title = '全屏'
-    this.btn.setAttribute('aria-label', '全屏')
     root.appendChild(this.btn)
-    this.unsub = player.subscribe((s) => {
+    this.bindState(player, (s) => {
       // 进入/退出共用一枚按钮：全屏态换成「还原」图标并同步提示文案
       this.btn.textContent = s.fullscreen ? '⧉' : '⛶'
-      this.btn.title = s.fullscreen ? '退出全屏' : '全屏'
-      this.btn.setAttribute('aria-label', s.fullscreen ? '退出全屏' : '全屏')
+      const label = uiText(s.fullscreen ? MSG.UI_FULLSCREEN_EXIT : MSG.UI_FULLSCREEN_ENTER)
+      this.btn.title = label
+      this.btn.setAttribute('aria-label', label)
     })
     this.track(
       bindPress(this.btn, () => {

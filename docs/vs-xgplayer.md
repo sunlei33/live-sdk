@@ -12,7 +12,7 @@
 | | live-sdk | xgplayer |
 |---|---|---|
 | **定位** | 垂直：H5 **直播**播放器 SDK，headless 内核 + 插件化 | 平台：通用 Web 播放器**全家桶**，VOD/Live/音乐/字幕/弹幕/投屏全覆盖 |
-| **体量** | `src/` **37 个 `.ts`，2941 代码行**（5097 总行）；npm 包 965 kB / 93 文件 | 16 个包，核心包 `xgplayer` **21371 行**；npm 包 2.2 MB / 293 文件，全仓 **~5.5 万行** |
+| **体量** | `src/` **39 个 `.ts`，3307 代码行**（5795 总行）；npm 包 1.2 MB / 97 文件 | 16 个包，核心包 `xgplayer` **21371 行**；npm 包 2.2 MB / 293 文件，全仓 **~5.5 万行** |
 | **优势** | 架构干净、状态契约显式、职责边界清晰、可读性强 | 能力全面、久经字节亿级 DAU 打磨、协议/容器/编解码/端适配覆盖面极广 |
 | **代价** | 能力域窄（无点播编排/DRM/弹幕/字幕/FLV/DASH）、端适配深度浅 | 耦合重、体积大、headless 不彻底（UI 与播放器实体强绑定）、状态模型隐式 |
 
@@ -29,7 +29,7 @@
 
 ### 1.0 代码规模（实测基线）
 
-**统计口径**（`2026-09-16` 实测，live-sdk `0.6.0`）：
+**统计口径**（`2026-09-23` 实测，live-sdk `0.6.0`）：
 
 - **代码行** = 剔除空行与注释（`//` 与 `/* */`，含块注释追踪）后的行数，比总行数更能反映真实体量；
 - **总行** = 文件原始行数（含空行、注释）。与 xgplayer 的「21371 行」对比时请注意其口径未公开，
@@ -40,17 +40,17 @@
 
 | 目录 | 文件 | 代码行 | 总行 | 职责 |
 |---|---|---|---|---|
-| `src/core/` | 9 | 1305 | 2154 | Player · StateMachine · StateStore · EventBus · PluginManager · BasePlugin · Hooks · **SessionMetrics** · **QualityController** |
-| `src/platform/web/` | 7 | 332 | 610 | Web 平台实现：WebMediaSurface · WebHost · selectKernel · capabilities · fullscreen · presets · dom |
-| `src/`（根） | 3 | 473 | 1003 | `types.ts`（全部契约类型）· `constants.ts` · `index.ts` |
-| `src/utils/` | 8 | 214 | 432 | 抽出的纯函数（可测性边界）：retry · features · errors · size · config · logger · **quality** · buffer |
-| `src/ui/` | 3 | 211 | 272 | 默认 UI 包（→ `live-sdk/ui`） |
-| `src/kernel/` | 2 | 206 | 279 | HlsKernel · NativeKernel（经 `config.kernel` 注入） |
-| `src/plugins/` | 2 | 126 | 230 | 随 SDK 附带、经 `preset` 装配的插件：ConsoleReporter · LivePolling |
+| `src/core/` | 9 | 1331 | 2207 | Player · StateMachine · StateStore · EventBus · PluginManager · BasePlugin · Hooks · **SessionMetrics** · **QualityController** |
+| `src/platform/web/` | 7 | 338 | 617 | Web 平台实现：WebMediaSurface · WebHost · selectKernel · capabilities · fullscreen · presets · dom |
+| `src/`（根） | 3 | 538 | 1195 | `types.ts`（全部契约类型）· `constants.ts` · `index.ts` |
+| `src/utils/` | 10 | 445 | 788 | 抽出的纯函数（可测性边界）：retry · features · errors · size · config · logger · quality · buffer · **i18n** · **messages** |
+| `src/ui/` | 3 | 235 | 326 | 默认 UI 包（→ `live-sdk/ui`） |
+| `src/kernel/` | 2 | 218 | 313 | HlsKernel · NativeKernel（经 `config.kernel` 注入） |
+| `src/plugins/` | 2 | 128 | 232 | 随 SDK 附带、经 `preset` 装配的插件：ConsoleReporter · LivePolling |
 | `src/env/` | 1 | 40 | 50 | WebEnvAdapter（经 `config.env` 注入） |
 | `src/adapters/` | 2 | 34 | 67 | React / Vue（→ `live-sdk/react` · `/vue`） |
-| **`src/` 小计** | **37** | **2941** | **5097** | 分发产物只含这一层 |
-| `test/` | 20 | 2909 | 3549 | Vitest 单测（16 个 .test.ts）+ DOM 替身 + Playwright E2E |
+| **`src/` 小计** | **39** | **3307** | **5795** | 分发产物只含这一层 |
+| `test/` | 21 | 3272 | 4004 | Vitest 单测（18 个 .test.ts）+ DOM 替身 + Playwright E2E |
 | `verify/` | 8 | 1575 | 2304 | 契约 · 分层依赖 · 产物卫生 · 公开面形状/活性 · 事件活性 · 冒烟 |
 | `examples/` | 1 | 34 | 92 | 接入方可直接复制的样板（含 reporter-sentry，被编译 + 单测保护） |
 | `scripts/` | 2 | 234 | 314 | 构建清理 + 发布脚本 |
@@ -71,43 +71,43 @@
 >
 > **值得注意的两个比例**：
 >
-> 1. **`src/core/Player.ts` 单文件 984 代码行**，占 `src/` 的 **33.5%** —— 它仍是最重的「协调者」，
+> 1. **`src/core/Player.ts` 单文件 1004 代码行**，占 `src/` 的 **30.4%** —— 它仍是最重的「协调者」，
 >    但已从 1063 行（36.9%）降下来：`SessionMetrics` 与 `QualityController` 两个派生状态簇已抽出
 >    （见 §3.2）。其余 36 个文件平均仅 ~54 行。
-> 2. **测试与验证代码（4718 行）超过 src（2941 行）**。这不是「测试写多了」，而是有意的：
+> 2. **测试与验证代码（4893 行）超过 src（3307 行）**。这不是「测试写多了」，而是有意的：
 >    契约层、公开面普查与冒烟都是**编译期/构建期的证明**，替代了一部分运行时验证成本。
 
 **分发体积**（`dist/`，`minify: false`，**未压缩**）：
 
 | 产物 | 原始 | gzip |
 |---|---|---|
-| `live-sdk.es.js`（核心，`hls.js` external） | 99.3 kB | **32.3 kB** |
-| `live-sdk.umd.js` | 105.5 kB | 33.0 kB |
-| `live-sdk-ui.es.js`（默认 UI 包） | 6.2 kB | 1.9 kB |
+| `live-sdk.es.js`（核心，`hls.js` external） | 112.5 kB | **36.2 kB** |
+| `live-sdk.umd.js` | 119.5 kB | 36.9 kB |
+| `live-sdk-ui.es.js`（默认 UI 包） | 14.5 kB | 5.3 kB |
 | `live-sdk-react.es.js` / `live-sdk-vue.es.js` | 0.3 / 0.6 kB | — |
 
 **npm 包对比**（core 包，`files: ["dist"]`）：
 
 | | 当前工作树 | `0.5.0`（npm 已发布） | xgplayer `3.0.26`（核心包） | 比值 |
 |---|---|---|---|---|
-| unpacked 体积 | 965 kB | 831 kB | 2.23 MB | ~2.3× |
-| 文件数 | 93 | 81 | 293 | ~3.2× |
+| unpacked 体积 | 1.2 MB | 831 kB | 2.23 MB | ~1.9× |
+| 文件数 | 97 | 81 | 293 | ~3.0× |
 | 包数（同装一份） | 1 | 1 | 1（另需各协议/功能包） | — |
 
-> 体积的大头不是代码而是 **sourcemap**：`dist` 内 537 kB / 965 kB（≈56%）都是 `.map`，
+> 体积的大头不是代码而是 **sourcemap**：`dist` 内 656 kB / 1050 kB（≈63%）都是 `.map`，
 > 因为 sourcemap 内嵌 `sourcesContent`（源码**原文**，含注释），且 `es` 与 `umd` 各嵌一份。
 > 这是「`minify: false` + 便于接入方阅读调试」这一取向的**必然代价**，不是失误。
 > 相对 0.5.0 的增长主要来自两处：P0/P1 平台解耦（新增 `src/platform/web/` 7 个文件与其声明）、
-> 以及上帝对象治理（新增 `SessionMetrics` / `QualityController` / `utils/quality`）。
+> 以及上帝对象治理（新增 `SessionMetrics` / `QualityController` / `utils/quality`），还有消息 i18n 体系（`utils/i18n` + `utils/messages` + `LV-7xxx` UI 文案表）。
 > 逐类核对过 0.5.0 → 0.6.0 的差异：`.js` / `.d.ts` / `.d.ts.map` 三类都**变小**，增量全在 `.js.map`。
 >
 > ⚠️ **由此引出一个应当知情的事实**：`files: ["dist"]` 会把 `.js.map` 一起发布，而 map 里含
 > `sourcesContent` —— 即**接入方从 npm 包就能读到 `src/` 的完整源码与注释原文**
-> （主包 map 内嵌约 116 kB）。这与本文档「`minify: false`，便于接入方阅读与调试」的既定取向一致，
+> （主包 map 内嵌约 256 kB）。这与本文档「`minify: false`，便于接入方阅读与调试」的既定取向一致，
 > 故按**有意设计**处理；若希望只公开构建产物，需另行决定是否剥离 `sourcesContent`。
 
 > ⚠️ **体积对比的注意事项**：live-sdk 构建配置是 `minify: false`（便于接入方阅读与调试，
-> 压缩交给使用方的打包器），因此上表的 99.3 kB **不是压缩后的对外体积**；gzip 后 32.3 kB 才是
+> 压缩交给使用方的打包器），因此上表的 112.5 kB **不是压缩后的对外体积**；gzip 后 36.2 kB 才是
 > 更接近实际的传输量。xgplayer 的 `dist` 则是压缩产物。**两者不可直接比大小**，
 > 上表只用于说明量级差异。
 
@@ -195,7 +195,7 @@
 | **异常可观测** | ✅ 统一 `ERROR_CODE`（13 个）+ **错误域 `err.domain`**（`network`/`decode`/`config`/`unknown`，接入方不必自建映射表）+ 内核 details 归一（大小写不敏感、404 取 HTTP 状态码）+ 重试诊断快照（地址 / 网络 / 第几次） | ⚠️ 错误码与底层 details 混合暴露，接入方需自行分类与拼装上下文；无「归因方向」这一层 |
 | **语义清晰度** | ✅ `playIntent` 等业务语义显式建模 | ⚠️ 语义隐含在 `paused`/`ended` 属性 |
 | **上手成本** | ✅ 配置项少、文档聚焦 | ⚠️ 配置项极多，文档滞后于源码 |
-| **生态/示例** | ❌ 无 | ✅ 官方文档站、大量 fixtures demo、多语言 i18n（15 种语言） |
+| **生态/示例** | ⚠️ 无官方文档站（有 `examples/` + 参考文档）；消息与**内置 UI 文案**支持 `en` · `zh` 两种（`locale` 配置，默认 `en`） | ✅ 官方文档站、大量 fixtures demo、多语言 i18n（15 种语言，含 UI 文案） |
 | **能力完备** | ❌ 无弹幕/字幕/投屏/截图/画中画等 | ✅ 全都有现成插件 |
 | **二次开发** | ✅ headless，易对接自绘 UI / RN / 小程序 | ⚠️ UI 内建，深度定制需绕开内建控件 |
 
@@ -265,7 +265,7 @@
 | **Lint** | **未引入 ESLint / Prettier**（有意）——静态保障由**两道编译期证明**承担：公开 API 面契约（`verify/tsconfig.json`）+ 事件活性普查。二者覆盖「契约形状」与「事件活性」，**不覆盖代码风格** | Biome + husky + lint-staged |
 | **测试** | 四层：Vitest 单测 **178 例 / 10 文件** → 契约 / 导出 / 事件活性 / 冒烟（**117 断言**）→ Playwright E2E **18 例**（chromium + webkit） | **Jest**（jsdom），55 个 `.spec.js`，覆盖 hls/flv/dash/transmuxer/cast/subtitles |
 | **发布** | 语义化版本，**公开 npm `@fancaf/live-sdk`**；`files: ["dist"]` 白名单（源码与 docs 不随包发出） | 语义化版本，npm 公开发布，含 prerelease 流程 |
-| **体积** | `src/` **2941 代码行 / 5097 总行**；npm 包 965 kB / 93 文件（核心 gzip 32.3 kB） | 核心包单包即 21371 行 / npm 包 2.23 MB / 293 文件，全仓 ~5.5 万行 |
+| **体积** | `src/` **3307 代码行 / 5795 总行**；npm 包 1.2 MB / 97 文件（核心 gzip 36.2 kB） | 核心包单包即 21371 行 / npm 包 2.23 MB / 293 文件，全仓 ~5.5 万行 |
 
 ### 3.2 架构优劣
 
@@ -274,17 +274,17 @@
 | **职责边界** | ✅ 三契约（状态/命令/事件）清晰，headless 彻底 | ⚠️ UI 与播放器实体耦合（`Player extends MediaProxy`，控件即插件） |
 | **可测试性** | ✅ 状态机可单测全路径；纯函数抽到 `utils/`（可测性边界）；契约/活性/冒烟三层编译期与构建期证明 | ✅ 有 Jest 体系，但状态散落、媒体依赖 mock 重 |
 | **可扩展性** | ✅ 内核可插拔（协议无关），插件化 | ✅ 插件生态成熟（弹幕/字幕/投屏/音乐…） |
-| **维护面** | ✅ 小（`src/` 2941 代码行，37 文件）；**单文件 `Player.ts` 984 行占 33.5%**（已从 1063/36.9% 降下来），仍是最大可读性债务（见下） | ⚠️ 大（5.5 万行 + 16 包），issue 积压（大量 Stale） |
+| **维护面** | ✅ 小（`src/` 3307 代码行，39 文件）；**单文件 `Player.ts` 1004 行占 30.4%**（已从 1063/36.9% 降下来），仍是最大可读性债务（见下） | ⚠️ 大（5.5 万行 + 16 包），issue 积压（大量 Stale） |
 | **生态成熟度** | ❌ 从零起盘 | ✅ 字节亿级 DAU 验证，文档站 + fixtures demo |
 | **端适配深度** | ⚠️ 仅 Web + Safari 回退 | ✅ iOS/Android WebView/大屏/TV/微信/投屏全覆盖 |
 | **可观测性** | ✅ 内建 `Reporter`（Console/Sentry）+ **错误域 `err.domain`** + `RetryDiagnostic` + `getStats()` / `getSessionReport()` + **`COMMAND` 命令观测** | ⚠️ 有 `stats`/`logger`/`fpsDetect` 插件，但无统一上报契约，错误无归因层 |
 
-> **live-sdk 自己最大的技术债：`core/Player.ts` 单文件 984 代码行（占 `src/` 33.5%）。**
+> **live-sdk 自己最大的技术债：`core/Player.ts` 单文件 1004 代码行（占 `src/` 30.4%）。**
 > 它承担装配、生命周期、状态同步、重连编排、命令实现、观测出口等全部职责，是典型的「上帝对象」。
 > 评估（字段—方法引用矩阵）给出的结论是**半合理**：10 个字段构成**共享骨干**（被 7~22 个方法使用），
 > 那是真耦合、拆不动；但另有 30 个字段各被 ≤5 个方法引用且成簇，属可抽的功能堆积。
 > 已抽出两块（`SessionMetrics` 7 字段 / `QualityController` + `utils/quality` 2 字段），
-> `Player` 由 1063 → **984 代码行**。仍待处理的见下（`play()` 已拆三相）。
+> `Player` 由 1063 → **1004 代码行**（回升的 ~20 行来自消息编号化：裸文案换成 `t(MSG.…, {…})`，属**可观测性换来的字符量**，不是抽离失效）。仍待处理的见下（`play()` 已拆三相）。
 > 抽取策略的另一个观察：`utils/` 那批**纯函数抽取从未让它变小**（769 → 840 → 963 → 1105 单调增长），
 > **只有搬走状态所有权才真的降行数** —— 这解释了为什么早期抽取没止住增长。
 > 对照 xgplayer 的教训（§3.3：自研栈 8633 行的 `transmuxer` 成为维护负担），

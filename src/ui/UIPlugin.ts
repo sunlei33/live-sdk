@@ -1,4 +1,6 @@
 import type { Player } from '../core/Player'
+import type { PlayerState } from '../types'
+import { onLocaleChange } from '../utils/i18n'
 
 /**
  * 统一的「按下」事件绑定：**只用 Pointer Events 单一事件源**。
@@ -36,6 +38,37 @@ export abstract class UIPlugin {
   /** 供子类注册清理函数；unmount 时由基类兜底调用 */
   protected track(dispose: () => void): void {
     this.disposers.push(dispose)
+  }
+
+  /**
+   * 订阅状态并**记住最近一次快照**（`unsub` 由基类持有，子类在 `unmount` 里释放）。
+   *
+   * 三件事：
+   * 1. **mount 时立即用 `player.getState()` 画一次** —— 不依赖 `subscribe` 是否同步回调
+   *    （否则图标/文案要等第一次状态变化才出现）；
+   * 2. 之后每次状态变化重绘；
+   * 3. 额外注册「语言变更 → 用最近快照重绘」。
+   *
+   * 第 3 条是关键：`subscribe` 只在**状态变化**时触发，而 `setLocale()` 不改状态 ——
+   * 若接入方在运行中切语言，光靠订阅会让已挂载的控件停在旧语言（tooltip 是中文、
+   * 新日志却是英文），且可能长期不刷新。语言变更通知补上了这个窗口。
+   *
+   * 订阅与监听都由 `track()` 登记，`unmount()` 时一并解除，不会泄漏。
+   * 无文案的控件（如音量滑块）也走这里 —— 结构统一，将来补文案不必再改绑定方式。
+   */
+  protected bindState(player: Player, render: (s: PlayerState) => void): void {
+    let last: PlayerState | null = null
+    const paint = (s: PlayerState) => {
+      last = s
+      render(s)
+    }
+    paint(player.getState())
+    this.unsub = player.subscribe(paint)
+    this.track(
+      onLocaleChange(() => {
+        if (last) render(last)
+      }),
+    )
   }
 
   /** 子类 unmount 末尾调用，统一解绑 */
