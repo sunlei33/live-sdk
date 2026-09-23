@@ -28,9 +28,11 @@
  * 退出码非 0 即失败（已接入 `npm run verify`）。
  */
 import { readdirSync, statSync, existsSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 
 const ROOT = process.cwd()
+/** 报告里的路径统一成正斜杠（Windows 下  返回反斜杠，读起来别扭） */
+const posix = (p) => p.split(sep).join('/')
 const DIST = join(ROOT, 'dist')
 const SRC = join(ROOT, 'src')
 
