@@ -99,7 +99,7 @@ export type ErrorDomain = (typeof ERROR_DOMAIN)[keyof typeof ERROR_DOMAIN]
  * | `LV-9xxx` | 兜底与内部不变量 |
  *
  * ⚠️ **编号一经发布不再改动、也不复用**（复用会让历史日志指向另一条消息）。
- * 文案表（编号 → 中英文）在 `utils/messages.ts`。
+ * 文案表（`MESSAGES`）与取用入口同在 `utils/i18n.ts` —— 表**不导出**，一律经 `t()` / `uiText()` 取。
  *
  * ⚠️ `LV-7xxx`（UI 控件）与其余分区的**取用方式不同**：UI 文案面向**终端用户**，
  * 编号是噪声 —— 用 `uiText()` 取纯文案；其余消息面向**开发与排查**，用 `t()` 取，
@@ -293,8 +293,8 @@ export const DEFAULT_NETWORK_STRATEGY: NetworkConfig = {
  *
  * 为什么默认英文：SDK 发布在公开 npm、README 为中英双语，日志与错误首先面向更广的读者；
  * 中文使用方显式传 `PlayerConfig.locale: 'zh'` 即可（一行配置）。
- * 只影响运行期消息（错误 / 日志 / 上报 / `FeatureStatus.detail` / `zeroSizeHint`），
- * **不含 UI 控件文案**（属产品文案）。文案表见 `utils/messages.ts`。
+ * 影响运行期消息（错误 / 日志 / 上报 / `FeatureStatus.detail` / `zeroSizeHint`）**与内置 UI 控件
+ * 文案**（0.6.0 起 UI 也继承同一 locale：`title` / `aria-label` / 下拉项）。文案表见 `utils/i18n.ts`。
  */
 export const DEFAULT_LOCALE: Locale = 'en'
 

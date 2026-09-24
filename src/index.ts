@@ -57,7 +57,7 @@ export type { SessionState, ErrorDomain, CommandName, MsgId } from './constants'
 export { deepMerge } from './utils/config'
 export { logger, setLogLevel } from './utils/logger'
 // 运行期消息语言（全局，与 setLogLevel 同类语义）：默认 `'en'`，`setLocale('zh')` 切中文。
-// 消息编号 → 中英文案的对照表在 `utils/messages.ts`。
+// 消息编号 → 中英文案的对照表在 `utils/i18n.ts`（表本身不导出，一律经 `t()` / `uiText()` 取）。
 export { setLocale, getLocale } from './utils/i18n'
 export { errorDomainOf } from './utils/errors'
 export { isZeroSized } from './utils/size'

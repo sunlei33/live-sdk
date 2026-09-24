@@ -18,8 +18,6 @@ import {
 } from '../constants'
 import { deepMerge } from '../utils/config'
 import { logger } from '../utils/logger'
-import { shouldDedupError, computeRetryDelay, type DedupState } from '../utils/retry'
-import { matchFeature } from '../utils/features'
 import { mapErrorCode, isFatalKernelError, mapMediaErrorCode, errorDomainOf } from '../utils/errors'
 import { isZeroSized } from '../utils/size'
 import { setLocale, t } from '../utils/i18n'
@@ -70,6 +68,24 @@ interface LivePollingLike {
   start(url?: unknown, interval?: number): void
   stop(): void
 }
+
+/**
+ * 同类错误去重状态（每个 `Player` 实例各持一份，多实例天然隔离）。
+ *
+ * 原 `utils/retry.ts#DedupState` —— 该模块的唯一消费者就是本类，故随逻辑一并并入，
+ * 并降级为**文件内局部**（不再是模块导出）。
+ */
+interface DedupState {
+  code: string
+  time: number
+}
+
+/**
+ * 同类错误去重窗口（ms）：同类错误在该窗口内只暴露一次。
+ *
+ * 原 `utils/retry.ts#ERROR_DEDUP_WINDOW_MS`，同上并入。
+ */
+const ERROR_DEDUP_WINDOW_MS = 10_000
 
 export class Player {
   // —— 暴露给接入方的挂载点 ——
@@ -720,10 +736,56 @@ export class Player {
       airplay: caps.nativeFallback ? 'degraded' : 'supported',
     }
     const features: FeatureStatus[] = (Object.keys(client) as FeatureKey[]).map((feature) =>
-      matchFeature(feature, client[feature], this.quality.serverState(feature)),
+      this.matchFeature(feature, client[feature], this.quality.serverState(feature)),
     )
     const matched = features.filter((f) => f.matched).length
     return { features, summary: { matched, mismatched: features.length - matched } }
+  }
+
+  /** 客户端侧能力是否「可用」：`degraded`=平台接管仍可用（如原生回退投屏）。 */
+  private isClientUsable(state: SideState): boolean {
+    return state === 'supported' || state === 'degraded'
+  }
+
+  /** 服务端侧是否「可用」：只有 `supported` 算满足；`unknown`=尚未探测，不算可用。 */
+  private isServerUsable(state: SideState): boolean {
+    return state === 'supported'
+  }
+
+  /**
+   * 计算单条特性的端到端对齐结果（spec §4.7）。
+   *
+   * `matched` 的统一口径 = 客户端可用 **且** 服务端可用。**不为 `airplay` 开特例**——
+   * 它「无服务端依赖」这件事改由 `server` 恒为 `supported` 来表达
+   * （见 `QualityController#probeServer`），而不是在匹配逻辑里绕过服务端判据
+   * （旧实现的 bug：`server=unknown` 却 `matched=true`）。
+   *
+   * 原 `utils/features.ts`（`matchFeature` + 上面两个判据）：该模块**唯一的生产消费者**
+   * 就是 `getFeatureStatus()`，故三个函数一并并入本类。
+   *
+   * ⚠️ **并入的代价（已知并接受）**：这些分支不再能被「直接调用纯函数」那样逐格覆盖，
+   * 只能经 `getFeatureStatus()` 的**可达组合**断言。三种组合在生产路径上不可能出现，
+   * 因此不再有对应用例：`client='unknown'`（`getFeatureStatus` 只产出
+   * supported/absent/degraded）、`server='degraded'`（`probeServer` 只产出
+   * supported/absent/unknown）、`airplay` 的 `server='absent'`（它恒为 `supported`）。
+   * 详见 `docs/implementation.md` §8.22。
+   */
+  private matchFeature(feature: FeatureKey, client: SideState, server: SideState): FeatureStatus {
+    const clientUsable = this.isClientUsable(client)
+    const serverUsable = this.isServerUsable(server)
+    const matched = clientUsable && serverUsable
+
+    let detail: string | undefined
+    if (!matched) {
+      detail = !clientUsable
+        ? t(MSG.FEATURE_CLIENT_UNSUPPORTED)
+        : !serverUsable
+          ? t(MSG.FEATURE_SERVER_ABSENT)
+          : t(MSG.FEATURE_MISMATCH)
+    } else if (client === 'degraded') {
+      detail = t(MSG.FEATURE_NATIVE_FALLBACK)
+    }
+    return { feature, client, server, matched, detail }
   }
 
   // ═══════════════ 插件 / 钩子 ═══════════════
@@ -1421,10 +1483,47 @@ export class Player {
     this.recover(out.code, out.message)
   }
 
+  /** 上一次**放行**的错误（`{ code, time }`）—— 被抑制时**不更新**它，见下。 */
   private lastErrState: DedupState = { code: '', time: 0 }
 
+  /**
+   * 同类错误节流去重（10s 窗口）。
+   *
+   * 设计意图（勿改）：直播断流往往是「同一故障的连续外化」，内核会成串抛出同类错误。
+   * 若逐条透出，接入方的 Sentry 会被同一条错误刷屏，且每一条都会触发一次重连——
+   * 这正是「重试风暴」。因此同一 code 在窗口内只放行第一条。
+   *
+   * 三条边界（都有单测锚定，见 `test/player.test.ts` 的退避/去重用例）：
+   * - 不同 code 互相不抑制 —— 换了个错误说明故障变了，必须放行；
+   * - 窗口外同一 code 再次出现也放行 —— 说明故障复发，需要重新上报；
+   * - **抑制路径不得刷新窗口起点**（只有放行路径才写 `state`）——
+   *   否则连续刷屏的同类错误会把窗口无限顺延，故障永远不会「复发上报」。
+   *
+   * 原 `utils/retry.ts#shouldDedupError`：唯一消费者就是本类，故并入；`now` 由原来的显式
+   * 入参改为就地读 `Date.now()`（测试经 `vi.setSystemTime` 控制时钟）。
+   */
   private lastErrorDedup(err: PlayerError): boolean {
-    return shouldDedupError(this.lastErrState, err, Date.now())
+    const state = this.lastErrState
+    const now = Date.now()
+    if (state.code === err.code && now - state.time < ERROR_DEDUP_WINDOW_MS) return true
+    state.code = err.code
+    state.time = now
+    return false
+  }
+
+  /**
+   * 指数退避 + 抖动（断流重连的等待时长）。
+   *
+   * 公式：`base * 2^(retryCount-1) + Math.random() * base`，`retryCount` 从 1 开始。
+   * - `2^(n-1)` 提供指数增长，避免固定间隔在服务端故障时形成共振；
+   * - `[0, base)` 的抖动打散多端同时重连（惊群）。
+   *
+   * 原 `utils/retry.ts#computeRetryDelay`（唯一消费者就是本类，故并入）。它原先带一个
+   * `random` 注入参数供单测控制抖动；**私有化后不再有注入点**，测试改为 spy 全局
+   * `Math.random` —— 效果等价，且少一个只为测试存在的参数。
+   */
+  private computeRetryDelay(base: number, retryCount: number): number {
+    return base * Math.pow(2, retryCount - 1) + Math.random() * base
   }
 
   private recover(code: string, message: string): void {
@@ -1445,7 +1544,7 @@ export class Player {
     }
     this.retryCount++
     const base = this.resolveTunable(this.config.network.retryDelay)
-    const delay = computeRetryDelay(base, this.retryCount)
+    const delay = this.computeRetryDelay(base, this.retryCount)
     const diagnostic = this.buildDiagnostic(code, delay)
     logger.warn(`[live-sdk] ${t(MSG.RETRY_START)}`, diagnostic)
     this.emit(Events.RETRY, { code, retryCount: this.retryCount, delay, diagnostic })

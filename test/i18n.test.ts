@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { t, uiText, setLocale, getLocale, onLocaleChange } from '../src/utils/i18n'
-import { MSG, DEFAULT_LOCALE } from '../src/constants'
-import { MESSAGES } from '../src/utils/messages'
+import { MSG, DEFAULT_LOCALE, type MsgId } from '../src/constants'
 
 describe('运行期消息：编号 + locale', () => {
   beforeEach(() => setLocale(DEFAULT_LOCALE))
@@ -32,14 +31,19 @@ describe('运行期消息：编号 + locale', () => {
   })
 
   it('文案表覆盖全部编号，且两种语言都非空（编号与文案不会单边漂移）', () => {
+    // ⚠️ 文案表（`MESSAGES`）已并入 `utils/i18n.ts` 且**不导出** —— 故改从**取用入口**反查：
+    // 缺文案时 `pick()` 会兜底成编号本身，于是「取到的文案 === 编号」就是「这条编号没有文案」。
     const ids = Object.values(MSG)
     expect(ids.length).toBeGreaterThan(30)
     for (const id of ids) {
-      const entry = MESSAGES[id as keyof typeof MESSAGES]
-      expect(entry, `缺少文案：${id}`).toBeDefined()
-      expect(entry.en.length, `英文文案为空：${id}`).toBeGreaterThan(0)
-      expect(entry.zh.length, `中文文案为空：${id}`).toBeGreaterThan(0)
+      for (const loc of ['en', 'zh'] as const) {
+        setLocale(loc)
+        const text = uiText(id as MsgId)
+        expect(text, `缺少文案：${id}（${loc}）`).not.toBe(id)
+        expect(text.trim().length, `文案为空：${id}（${loc}）`).toBeGreaterThan(0)
+      }
     }
+    setLocale(DEFAULT_LOCALE)
   })
 
   it('编号唯一，且形如 `LV-<四位>`（分区见 constants.ts#MSG）', () => {
@@ -62,10 +66,14 @@ describe('运行期消息：编号 + locale', () => {
     expect(uiIds.length).toBeGreaterThan(0)
     for (const [key, id] of uiIds) {
       expect(id, `${key} 不在 LV-7xxx 分区`).toMatch(/^LV-7\d{3}$/)
-      const entry = MESSAGES[id as keyof typeof MESSAGES]
-      expect(entry?.en, `缺少英文文案：${id}`).toBeTruthy()
-      expect(entry?.zh, `缺少中文文案：${id}`).toBeTruthy()
+      for (const loc of ['en', 'zh'] as const) {
+        setLocale(loc)
+        const text = uiText(id as MsgId)
+        expect(text, `缺少 ${loc} 文案：${id}`).not.toBe(id)
+        expect(text.trim().length, `${loc} 文案为空：${id}`).toBeGreaterThan(0)
+      }
     }
+    setLocale(DEFAULT_LOCALE)
   })
 })
 

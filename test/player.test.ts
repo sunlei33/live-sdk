@@ -12,6 +12,24 @@ let PlayerCtor: typeof import('../src/core/Player').Player
 /** P0：`Player` 需注入平台装配包；测试用真实 Web 实现（动态导入，等 DOM 就绪） */
 let createWebPlatform: typeof import('../src/platform/web').createWebPlatform
 
+/** 内核替身的能力位旋钮（对应 `KernelCapabilities` 里被 `getFeatureStatus` 读到的四项） */
+type MockCaps = {
+  lowLatency: boolean
+  qualitySwitch: boolean
+  abr: boolean
+  stats: 'full' | 'basic'
+  nativeFallback: boolean
+}
+
+type MockKernelOpts = {
+  /** 覆写默认能力位（默认全开、`nativeFallback: false`） */
+  caps?: Partial<MockCaps>
+  /** `manifest_parsed` 的载荷；传 `'never'` 表示**不派发** —— 用于「内核已建但清单未解析」 */
+  manifest?: unknown
+  /** `getLevels()` 返回的档位数量（影响 `probeServer` 判定的「是否多档」） */
+  levels?: number
+}
+
 /**
  * 最小内核替身：load() 即视为 manifest 就绪，用于驱动 attemptPlay 分支。
  * 避免依赖真实 HLS 流；原生回退/断流等分支由 e2e 的 MockKernel 覆盖。
@@ -19,8 +37,9 @@ let createWebPlatform: typeof import('../src/platform/web').createWebPlatform
  * @param getLive 传入即挂载 `Kernel.isLive?()`（每次读取时求值，便于用例中途翻转）。
  *   **不传 = 根本不实现该扩展方法** —— 用于覆盖「回退到 `duration` 判据」的路径
  *   （对应 `NativeKernel` 与自定义内核）。
+ * @param opts 能力位 / 清单载荷 / 档位数的旋钮 —— 供端到端能力对齐用例构造各种「客户端 × 服务端」组合。
  */
-function makeMockKernel(getLive?: () => boolean) {
+function makeMockKernel(getLive?: () => boolean, opts: MockKernelOpts = {}) {
   return class MockKernel {
     // 声明而不初始化：不传 getLive 时该属性不存在于实例上（真正模拟「未实现」）
     declare isLive?: () => boolean
@@ -34,6 +53,7 @@ function makeMockKernel(getLive?: () => boolean) {
       abr: true,
       stats: 'full' as const,
       nativeFallback: false,
+      ...(opts.caps ?? {}),
     }
     private onEvent: (e: string, d?: unknown) => void
     constructor(opts: { onEvent: (e: string, d?: unknown) => void }) {
@@ -41,7 +61,8 @@ function makeMockKernel(getLive?: () => boolean) {
       if (getLive) this.isLive = getLive
     }
     async load(): Promise<void> {
-      this.onEvent('manifest_parsed', {})
+      if (opts.manifest === 'never') return // 内核建好但不解析清单 → 服务端侧停在 unknown
+      this.onEvent('manifest_parsed', opts.manifest ?? {})
     }
     async switchURL(): Promise<void> {}
     switchQuality(): void {}
@@ -54,7 +75,12 @@ function makeMockKernel(getLive?: () => boolean) {
     recover(): void {}
     destroy(): void {}
     getLevels(): unknown[] {
-      return []
+      return Array.from({ length: opts.levels ?? 0 }, (_, i) => ({
+        index: i,
+        width: 640 * (i + 1),
+        height: 360 * (i + 1),
+        bitrate: 800_000 * (i + 1),
+      }))
     }
     getCurrentLevel(): number {
       return -1
@@ -988,6 +1014,271 @@ describe('运行期消息语言（PlayerConfig.locale，默认 en）', () => {
     const msg = await playWithoutUrl(p)
     expect(msg.startsWith('[LV-4002] ')).toBe(true)
     // 编号恒定，只有后半段随语言变化（上一用例已覆盖中文）
+    p.destroy()
+  })
+})
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 以下两组用例原先各自独立成文件（`test/features.test.ts` / `test/retry.test.ts`），
+// 对应 `src/utils/features.ts` 与 `src/utils/retry.ts`。两个模块的唯一生产消费者都是
+// `Player`，已并入 `core/Player.ts`（私有方法 / 文件内局部），故用例随之迁到本文件 ——
+// 入口从「直接调用纯函数」换成「驱动 Player 的公开行为」。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('端到端能力对齐（getFeatureStatus；规则原 utils/features.ts）', () => {
+  type Report = ReturnType<PlayerInstance['getFeatureStatus']>
+  const pick = (r: Report, f: string) => r.features.find((x) => x.feature === f)!
+
+  /**
+   * 按给定条件起播一次并取对齐报告。
+   *
+   * `getFeatureStatus()` 是 `matchFeature` **唯一的可达入口**（它已私有化），
+   * 所以每种「客户端 × 服务端」组合都要靠内核能力位 + 清单载荷 + 档位数来构造。
+   */
+  async function featureReport(opts: MockKernelOpts & { observability?: 'full' | 'basic' } = {}): Promise<Report> {
+    const p = createPlayer(
+      { observability: opts.observability ?? 'full' },
+      () => makeMockKernel(undefined, opts),
+    )
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    const report = p.getFeatureStatus()
+    p.destroy()
+    return report
+  }
+
+  it('两端都 supported → matched 且无 detail（abr / qualitySwitch）', async () => {
+    const r = await featureReport({ levels: 2 })
+    expect(pick(r, 'abr')).toMatchObject({ client: 'supported', server: 'supported', matched: true })
+    expect(pick(r, 'abr').detail).toBeUndefined()
+    expect(pick(r, 'qualitySwitch').matched).toBe(true)
+  })
+
+  it('client=absent（drm 恒 absent）→ 未对齐，detail 指「客户端不支持」', async () => {
+    const r = await featureReport({ levels: 2 })
+    expect(pick(r, 'drm')).toMatchObject({
+      client: 'absent',
+      matched: false,
+      detail: '[LV-6002] unsupported by the client',
+    })
+  })
+
+  it('server=absent（清单未声明 LL）→ 未对齐，detail 指「服务端未提供」', async () => {
+    const r = await featureReport({ manifest: {} }) // 载荷无 hasLL → 服务端 lowLatency=absent
+    expect(pick(r, 'lowLatency')).toMatchObject({
+      client: 'supported',
+      server: 'absent',
+      matched: false,
+      detail: '[LV-6003] not provided by the server',
+    })
+  })
+
+  it('清单声明 hasLL → lowLatency 两端对齐', async () => {
+    const r = await featureReport({ manifest: { hasLL: true } })
+    expect(pick(r, 'lowLatency')).toMatchObject({ client: 'supported', server: 'supported', matched: true })
+  })
+
+  it('【回归】server=unknown 不得判 matched（旧 bug：airplay 特例绕过服务端判据）', async () => {
+    // 内核已建（capabilities 可读）但清单尚未解析 → 服务端侧全部停在 unknown
+    const r = await featureReport({ manifest: 'never' })
+    expect(pick(r, 'abr')).toMatchObject({ client: 'supported', server: 'unknown', matched: false })
+    expect(pick(r, 'abr').detail).toBe('[LV-6003] not provided by the server')
+  })
+
+  it('observability=basic → 客户端侧 lowLatency 降为 absent（观测不深就不claim 低延迟）', async () => {
+    const r = await featureReport({ observability: 'basic', manifest: { hasLL: true } })
+    expect(pick(r, 'lowLatency')).toMatchObject({
+      client: 'absent',
+      server: 'supported',
+      matched: false,
+      detail: '[LV-6002] unsupported by the client',
+    })
+  })
+
+  it('airplay MSE 路径：client=supported + server=supported → matched 且无 detail', async () => {
+    const r = await featureReport()
+    expect(pick(r, 'airplay')).toMatchObject({ client: 'supported', matched: true })
+    expect(pick(r, 'airplay').detail).toBeUndefined()
+  })
+
+  it('airplay 原生回退：client=degraded + server=supported → matched，detail 说明由系统接管', async () => {
+    const r = await featureReport({ caps: { nativeFallback: true } })
+    expect(pick(r, 'airplay')).toMatchObject({
+      client: 'degraded',
+      server: 'supported',
+      matched: true,
+      detail: '[LV-6005] native fallback path; casting is handled by the system',
+    })
+  })
+
+  it('报告恒 5 项，summary 计数与项数一致', async () => {
+    const r = await featureReport({ levels: 2, manifest: { hasLL: true } })
+    expect(r.features.map((f) => f.feature).sort()).toEqual(['abr', 'airplay', 'drm', 'lowLatency', 'qualitySwitch'])
+    const matched = r.features.filter((f) => f.matched).length
+    expect(r.summary).toEqual({ matched, mismatched: 5 - matched })
+  })
+
+  // ⚠️ 迁移**丢掉**的三格（生产路径不可达，故不再有用例；见 docs/implementation.md §8.22）：
+  //   `client='unknown'`（`getFeatureStatus` 只产出 supported/absent/degraded）、
+  //   `server='degraded'`（`probeServer` 只产出 supported/absent/unknown，airplay 恒 supported）。
+})
+
+describe('断流恢复：错误去重与指数退避（原 utils/retry.ts）', () => {
+  /** 可控时钟：去重窗口与「故障复发」都靠它驱动（比 fake timers 更小、更准） */
+  let clock = 1_700_000_000_000
+  let nowSpy: { mockRestore: () => void }
+
+  beforeEach(() => {
+    clock = 1_700_000_000_000
+    nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+  })
+  afterEach(() => nowSpy.mockRestore())
+
+  /** 模拟原生 <video> 抛错（MediaError.code）→ 走 Player 的错误分级链路 */
+  function fire(code: number | undefined, message = ''): void {
+    ;(video as unknown as { error: unknown }).error = code === undefined ? null : { code, message }
+    video._fire('error')
+  }
+
+  /** 起播一个播放器，并收集 ERROR / RETRY 两条通道（去重与退避都在这两处外化） */
+  async function recoverable(opts: { retryCount?: number; retryDelay?: number } = {}) {
+    const p = createPlayer({
+      network: { retryCount: opts.retryCount ?? 5, retryDelay: opts.retryDelay ?? 1000, loadTimeout: 60_000 },
+    })
+    const errors: Array<{ code: string }> = []
+    const delays: number[] = []
+    p.on('error', (e) => errors.push(e as { code: string }))
+    p.on('retry', (e) => delays.push((e as { delay: number }).delay))
+    await p.play({ url: 'https://cdn/a.m3u8' })
+    return { p, errors, delays }
+  }
+
+  /** 连续触发 n 次可恢复错误；每次之间把时钟推过 10s 去重窗口，避免被抑制 */
+  function fireRecoverable(n: number, code = 2, message = 'network interrupted'): void {
+    for (let i = 0; i < n; i++) {
+      if (i > 0) clock += 20_000
+      fire(code, message)
+    }
+  }
+
+  it('首次出现的错误 → 放行（派发 ERROR 并进入重连）', async () => {
+    const { p, errors, delays } = await recoverable()
+    fire(2, 'network interrupted')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({ code: ERROR_CODE.NETWORK_ERROR })
+    expect(delays).toHaveLength(1) // 可恢复 → 排了一次重连
+    p.destroy()
+  })
+
+  it('窗口内同类错误 → 抑制（连 Sentry 都不该被刷屏）', async () => {
+    const { p, errors } = await recoverable()
+    fire(2)
+    clock += 1
+    fire(2)
+    expect(errors).toHaveLength(1)
+    p.destroy()
+  })
+
+  it('窗口内同类错误连续出现 → 只放行第一条', async () => {
+    const { p, errors } = await recoverable()
+    fire(2)
+    clock += 1
+    fire(2)
+    clock += 9_998 // 距首条共 9_999ms，仍在窗口内
+    fire(2)
+    expect(errors).toHaveLength(1)
+    p.destroy()
+  })
+
+  it('恰好超出窗口边界（10_000ms）→ 放行（故障复发，需要重新上报）', async () => {
+    const { p, errors } = await recoverable()
+    fire(2)
+    clock += 10_000
+    fire(2)
+    expect(errors).toHaveLength(2)
+    p.destroy()
+  })
+
+  it('不同 code 互相不抑制（故障变了必须放行）', async () => {
+    const { p, errors } = await recoverable()
+    fire(2) // → network_error（可恢复）
+    clock += 1
+    fire(3) // → media_decode_error（fatal，不重连，但仍要透出）
+    expect(errors.map((e) => e.code)).toEqual([ERROR_CODE.NETWORK_ERROR, ERROR_CODE.MEDIA_DECODE_ERROR])
+    p.destroy()
+  })
+
+  it('换 code 后原 code 的窗口被重置（以最后一次放行为准）', async () => {
+    const { p, errors } = await recoverable()
+    fire(2) // A 放行
+    clock += 5_000
+    fire(3) // B 放行，state 变为 B
+    clock += 1_000 // 距 A 仅 6s，若按 A 的窗口判就会被抑制
+    fire(2) // A 再出现：与 state(B) 不同 → 放行
+    expect(errors).toHaveLength(3)
+    p.destroy()
+  })
+
+  it('抑制时不更新窗口起点（否则窗口无限顺延，故障永不复发上报）', async () => {
+    const { p, errors } = await recoverable()
+    fire(2) // t0 放行
+    clock += 9_000
+    fire(2) // 被抑制 —— 不得把起点刷成 t0+9s
+    clock += 1_000 // 距**首条**恰好 10_000ms → 已超窗
+    fire(2)
+    expect(errors).toHaveLength(2)
+    p.destroy()
+  })
+
+  it('退避：无抖动时 = base * 2^(n-1)', async () => {
+    const { p, delays } = await recoverable({ retryCount: 8, retryDelay: 1000 })
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0)
+    fireRecoverable(4)
+    expect(delays).toEqual([1000, 2000, 4000, 8000])
+    rand.mockRestore()
+    p.destroy()
+  })
+
+  it('退避：抖动上限为 base（Math.random → 1）', async () => {
+    const { p, delays } = await recoverable({ retryCount: 8, retryDelay: 1000 })
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(1)
+    fireRecoverable(3)
+    expect(delays).toEqual([2000, 3000, 5000])
+    rand.mockRestore()
+    p.destroy()
+  })
+
+  it('退避：严格落在 [base*2^(n-1), base*2^(n-1) + base) 区间内', async () => {
+    const base = 500
+    const { p, delays } = await recoverable({ retryCount: 8, retryDelay: base })
+    fireRecoverable(6)
+    expect(delays).toHaveLength(6)
+    delays.forEach((d, i) => {
+      const exp = base * Math.pow(2, i)
+      expect(d, `第 ${i + 1} 次退避`).toBeGreaterThanOrEqual(exp)
+      expect(d, `第 ${i + 1} 次退避`).toBeLessThan(exp + base)
+    })
+    p.destroy()
+  })
+
+  it('退避：同抖动比例下递增（指数增长不被抖动吃掉）', async () => {
+    const { p, delays } = await recoverable({ retryCount: 8, retryDelay: 1000 })
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    fireRecoverable(3)
+    expect(delays).toEqual([1500, 2500, 4500])
+    expect(delays[1]).toBeGreaterThan(delays[0])
+    expect(delays[2]).toBeGreaterThan(delays[1])
+    rand.mockRestore()
+    p.destroy()
+  })
+
+  it('退避：默认使用 Math.random（不注入也有限、可用）', async () => {
+    const { p, delays } = await recoverable({ retryCount: 8, retryDelay: 1000 })
+    const spy = vi.spyOn(Math, 'random')
+    fireRecoverable(1)
+    expect(spy).toHaveBeenCalled()
+    expect(Number.isFinite(delays[0])).toBe(true)
+    spy.mockRestore()
     p.destroy()
   })
 })

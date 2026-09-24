@@ -15,8 +15,9 @@ export type Observability = 'full' | 'basic'
  * 运行期消息语言（`PlayerConfig.locale`）：`en`（默认）| `zh`。
  *
  * 只影响**运行期消息** —— 错误 / 日志 / 上报记录 / `FeatureStatus.detail` / `zeroSizeHint`。
- * **不含 UI 控件文案**（那是产品文案，默认 UI 的按钮标签仍为中文）。
- * 实现见 `utils/i18n.ts`，文案表见 `utils/messages.ts`（编号 → 中英文）。
+ * **含内置 UI 控件文案**（0.6.0 起继承同一 locale —— tooltip / `aria-label` / 下拉项；
+ * 自绘 UI 的文案由接入方自行决定）。
+ * 实现与文案表都在 `utils/i18n.ts`（编号 → 中英文）。
  */
 export type Locale = 'en' | 'zh'
 

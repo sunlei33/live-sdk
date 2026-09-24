@@ -933,7 +933,34 @@
 - **补充说明（内部实现，不构成接入方契约）**：「何时算就绪」的判断由 `Player` 持有；
   `kernelReady` / `runHooks` 均为内部成员、不在公开面上，且由 `verify/visibility.mjs` 兜底防止再漏出去。
 
+### US-57 `utils/` 精简：文案表并入 `i18n`，能力对齐与重连规则并入 `Player`（0.6.0）
+
+- **目标**：减少 `utils/` 目录的碎片（**9 → 6 个模块**）—— 三个「**唯一消费者在别处**」的模块归位到持有者：
+  文案表 `MESSAGES` → `utils/i18n.ts`（其唯一消费者 `pick()` 就在那里）；
+  `matchFeature` 一族 → `Player`（唯一生产消费者是 `getFeatureStatus()`）；
+  错误去重与退避 → `Player`（唯一消费者是 `dispatchError` / `recover`）。
+- **配置**：无。**公开面不变**（`MESSAGES` 本就未导出；`shouldDedupError` / `computeRetryDelay` /
+  `matchFeature` 等从未出现在 `src/index.ts` 的导出里）。
+- **交互**：
+  1. 按 README 正常接入：`createPlayer` → `play()` → 读 `getState()` / `getFeatureStatus()`。
+  2. 观察错误与重连两条通道：`player.on('error')`、`player.on('retry')`。
+  3. 若代码里曾 `import { matchFeature } from '@fancaf/live-sdk'`（**不该有人这么写**，它从未导出），
+     改为读 `player.getFeatureStatus()` 的报告。
+- **预期**：
+  1. **运行时行为完全不变** —— 本轮是纯搬迁（函数体逐行照搬，设计意图注释一起搬）。
+  2. `utils/` 只剩 6 个模块：`buffer` · `config` · `errors` · `i18n` · `logger` · `size`。
+  3. **文案表不再从模块导出**：取文案只有 `t()`（带 `[LV-xxxx]` 编号，面向开发）与
+     `uiText()`（纯文案，面向终端用户）两个入口；两者都在 `utils/i18n.ts` 里，但**都不在 npm 包公开面上**。
+  4. 错误去重窗口（10s）与退避公式（`base * 2^(n-1) + 抖动`）**语义与数值不变**：
+     同类错误窗口内只上报一次、跨 `code` 不互相抑制、抑制时**不刷新窗口起点**。
+  5. **覆盖代价（如实告知）**：能力对齐矩阵里 `client='unknown'`、`server='degraded'`、
+     `airplay` 的 `server='absent'` 三种组合**生产路径不可能产生**，并入后不再有对应用例；
+     其余组合全部保留（含「`server=unknown` 不判 matched」这条历史回归）。
+- **验收方式**：单测（`test/player.test.ts` 新增两组：能力对齐经 `getFeatureStatus()` 驱动、
+  去重与退避经 `ERROR` / `RETRY` 事件驱动）+ 冒烟（`verify/smoke.mjs` 原样通过，未改断言）。
+
 ---
+
 
 ## 附录：验收环境建议
 | 项 | 建议 |

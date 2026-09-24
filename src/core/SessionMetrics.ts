@@ -18,7 +18,7 @@ import type { SessionReport } from '../types'
  * ── 时钟注入 ──
  *
  * `now` 由构造参数注入（默认 `Date.now`）。这样「10 秒窗口边界」这类最易写错的点可以直接断言，
- * 不必等真实时间 —— 与 `utils/retry.ts` 的 `shouldDedupError(state, err, now)` 是同一个思路。
+ * 不必等真实时间 —— 与 `Player#lastErrorDedup`（去重窗口）是同一个思路，测试都靠控制时钟。
  */
 export class SessionMetrics {
   /** 本轮会话起播时刻（`reset()` 时重置） */

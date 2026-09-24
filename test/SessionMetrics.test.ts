@@ -5,7 +5,7 @@ import { SessionMetrics } from '../src/core/SessionMetrics'
  * `SessionMetrics` 单测：**不需要 Player、不需要 DOM、不需要内核** —— 这正是把它抽出来的收益。
  *
  * 时钟由构造参数注入，所以「进行中时段实时计入」「离开路径统一结算」这类最容易算错的点
- * 都可以确定性断言，不必依赖真实时间（同 `utils/retry.ts` 的 `shouldDedupError(…, now)`）。
+ * 都可以确定性断言，不必依赖真实时间（同 `Player#lastErrorDedup` 去重窗口的 `vi.setSystemTime` 用法）。
  */
 function withClock(start = 1000) {
   let t = start
